@@ -27,7 +27,7 @@ try {
 } finally { Pop-Location }
 
 # 3. Text formatting.
-$files = Get-ChildItem $root -Recurse -File -Include *.cs, *.ps1, *.md, *.yml, *.yaml, *.json, *.js |
+$files = Get-ChildItem $root -Recurse -File -Include *.cs, *.cpp, *.h, *.def, *.ps1, *.md, *.yml, *.yaml, *.json, *.js |
     Where-Object { $_.FullName -notmatch '\\(bin|obj|\.git|node_modules|tests\\out)\\' -and $_.Name -ne 'package-lock.json' }
 # UTF-8 text misread as Windows-1252, e.g. an arrow turning into three junk characters.
 $mojibake = [string][char]0x00E2 + [char]0x20AC + '|' + [char]0x00C3 + '[\x80-\xBF]'

@@ -1,0 +1,4 @@
+LIBRARY PlugPassCredProv
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
