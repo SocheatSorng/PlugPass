@@ -5,7 +5,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -33,13 +32,14 @@ function enrol(root) {
   assert.equal(r.status, 0, r.stderr.toString());
 }
 
-function tile(scenario, { keyDir = drive, reg = regKey, dll = testDll, users, report } = {}) {
-  const args = [dll, scenario, ...(users ? [users.join(",")] : [])];
+function tile(scenario, { keyDir = drive, reg = regKey, build = "test", users, report } = {}) {
+  const args = [build, scenario, ...(users ? [users.join(",")] : [])];
   const r = spawnSync(harness, args, {
     env: {
       ...process.env,
       PLUGPASS_HOME: home,
       PLUGPASS_KEY_DIR: keyDir,
+      PLUGPASS_HARNESS_EXPECT: FAKE_PASSWORD,
       PLUGPASS_TEST_REGKEY: reg,
       ...(report ? { PLUGPASS_HARNESS_REPORT: report } : {}),
     },
@@ -70,10 +70,6 @@ after(() => {
   deleteRegKey(regKey);
 });
 
-const expectedHash = createHash("sha256")
-  .update(Buffer.from(FAKE_PASSWORD, "utf16le"))
-  .digest("hex");
-
 test("sign-in: drive present -> one tile, auto sign-in, the enrolled user and password", () => {
   const t = tile("logon", { report: "success" });
   assert.equal(t.scenario, "0x00000000");
@@ -87,7 +83,7 @@ test("sign-in: drive present -> one tile, auto sign-in, the enrolled user and pa
     t.message,
     `2 domain ${process.env.COMPUTERNAME} user ${me} password-length ${FAKE_PASSWORD.length}`,
   ); // 2 = KerbInteractiveLogon
-  assert.equal(t["password-sha256"], expectedHash, "C++ decrypts exactly what C# encrypted");
+  assert.equal(t["password-match"], "1", "C++ decrypts exactly what C# encrypted");
   assert.equal(t["after-report"], "count 1 auto 1", "a successful sign-in changes nothing");
 });
 
@@ -101,7 +97,7 @@ test("unlock: offered only for the locked user", () => {
 
 test("everything except sign-in and unlock is refused (UAC, app password prompts)", () => {
   assert.equal(tile("credui").scenario, E_NOTIMPL);
-  assert.equal(tile("credui", { dll: realDll }).scenario, E_NOTIMPL);
+  assert.equal(tile("credui", { build: "real" }).scenario, E_NOTIMPL);
 });
 
 test("no drive, another PC, or a wrong key: no tile at all", () => {

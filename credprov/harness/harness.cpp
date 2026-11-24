@@ -1,9 +1,10 @@
 // Test harness: loads the sign-in tile DLL the way LogonUI does (DllGetClassObject -> ICredentialProvider,
 // SetUsageScenario, SetUserArray, Advise, wait for CredentialsChanged, GetCredentialCount...) and walks
-// the sign-in steps WITHOUT signing anyone in. It never prints a password: only its length, plus (only
-// with PLUGPASS_HOME set, i.e. test data) a SHA-256 of the fake test password so tests can compare.
+// the sign-in steps WITHOUT signing anyone in. It never prints or hashes a password: it prints the
+// length, and (test data only, PLUGPASS_HOME set) whether it equals PLUGPASS_HARNESS_EXPECT.
+// It only loads the tile from its own build: "test" = the DLL next to it (bin\test), "real" = bin\.
 //
-//   credprov-harness.exe <dll> logon|unlock|credui [user1,user2,...]
+//   credprov-harness.exe test|real logon|unlock|credui [user1,user2,...]
 //   (with a user list: the tile is told those are the users Windows is asking about, as on unlock)
 //   Set PLUGPASS_HARNESS_REPORT=success to report a successful sign-in instead of a rejected one.
 // Output: one "key value" line per step.
@@ -157,16 +158,28 @@ static std::wstring FromOffset(const BYTE* base, ULONG size, const UNICODE_STRIN
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc < 3 || argc > 4)
+    if (argc < 3 || argc > 4 || (wcscmp(argv[1], L"test") != 0 && wcscmp(argv[1], L"real") != 0))
     {
-        fwprintf(stderr, L"usage: credprov-harness <dll> logon|unlock|credui [user1,user2]\n");
+        fwprintf(stderr, L"usage: credprov-harness test|real logon|unlock|credui [user1,user2]\n");
         return 2;
     }
+    // The tile DLL from this build only: next to the harness (test variant) or one folder up (real).
+    wchar_t self[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, self, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH)
+    {
+        return 1;
+    }
+    std::wstring dir(self, n);
+    dir = dir.substr(0, dir.find_last_of(L'\\'));
+    std::wstring dllPath = wcscmp(argv[1], L"test") == 0
+                               ? dir + L"\\PlugPassCredProv.dll"
+                               : dir.substr(0, dir.find_last_of(L'\\')) + L"\\PlugPassCredProv.dll";
     CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus = wcscmp(argv[2], L"logon") == 0    ? CPUS_LOGON
                                               : wcscmp(argv[2], L"unlock") == 0 ? CPUS_UNLOCK_WORKSTATION
                                                                                  : CPUS_CREDUI;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    HMODULE dll = LoadLibraryW(argv[1]);
+    HMODULE dll = LoadLibraryExW(dllPath.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dll)
     {
         wprintf(L"load failed %lu\n", GetLastError());
@@ -252,18 +265,14 @@ int wmain(int argc, wchar_t** argv)
             wprintf(L"message %d domain %ls user %ls password-length %zu\n", k->Logon.MessageType, domain.c_str(),
                     user.c_str(), pass.size());
             wchar_t home[8];
-            if (GetEnvironmentVariableW(L"PLUGPASS_HOME", home, 8) > 0)
+            wchar_t expect[128] = {};
+            if (GetEnvironmentVariableW(L"PLUGPASS_HOME", home, 8) > 0 &&
+                GetEnvironmentVariableW(L"PLUGPASS_HARNESS_EXPECT", expect, 128) > 0)
             {
-                BYTE digest[32];
-                BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, reinterpret_cast<PUCHAR>(&pass[0]),
-                           static_cast<ULONG>(pass.size() * sizeof(wchar_t)), digest, 32);
-                wprintf(L"password-sha256 ");
-                for (BYTE b : digest)
-                {
-                    wprintf(L"%02x", b);
-                }
-                wprintf(L"\n");
+                // Test data only: is it exactly the fake password the test enrolled?
+                wprintf(L"password-match %d\n", pass == expect);
             }
+            SecureZeroMemory(expect, sizeof(expect));
             SecureZeroMemory(&pass[0], pass.size() * sizeof(wchar_t));
             SecureZeroMemory(cs.rgbSerialization, cs.cbSerialization);
             CoTaskMemFree(cs.rgbSerialization);
