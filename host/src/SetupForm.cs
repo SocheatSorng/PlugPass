@@ -14,6 +14,7 @@ namespace PlugPass
         private readonly TextBox _again;
         private readonly Label _message;
         private readonly Button _create;
+        private readonly Button _changePin;
 
         internal SetupForm()
         {
@@ -125,9 +126,17 @@ namespace PlugPass
             _create.MinimumSize = new Size(88, 28);
             _create.Margin = new Padding(8, 0, 0, 0);
             _create.Click += delegate { CreateKey(); };
-            PinForm.SameWidth(_create, close);
+            _changePin = new Button();
+            _changePin.Text = "Change PIN...";
+            _changePin.AutoSize = true;
+            _changePin.MinimumSize = new Size(88, 28);
+            _changePin.Margin = new Padding(8, 0, 0, 0);
+            _changePin.Visible = false;
+            _changePin.Click += delegate { ChangePin(); };
+            PinForm.SameWidth(_create, close, _changePin);
             buttons.Controls.Add(close);
             buttons.Controls.Add(_create);
+            buttons.Controls.Add(_changePin);
             layout.Controls.Add(buttons);
             layout.SetColumnSpan(buttons, 2);
 
@@ -191,21 +200,46 @@ namespace PlugPass
         private void UpdateState()
         {
             DriveItem d = _drives.SelectedItem as DriveItem;
+            bool hasKey = d != null && KeyFile.Exists(d.Root);
             if (d == null)
             {
                 ShowMessage("Plug in a USB flash drive, then click Refresh.", false);
-                _create.Enabled = false;
             }
-            else if (KeyFile.Exists(d.Root))
+            else if (hasKey)
             {
-                ShowMessage("This drive already has a PlugPass key.", false);
-                _create.Enabled = false;
+                // Nothing to type here: the PIN boxes are only for a new key.
+                ShowMessage("Drive " + d.Root.TrimEnd('\\') + " is already your PlugPass key. There's nothing more to set up. "
+                    + "To change its PIN, click Change PIN.", false);
             }
             else
             {
                 ShowMessage("", false);
-                _create.Enabled = true;
             }
+            bool canCreate = d != null && !hasKey;
+            _create.Enabled = canCreate;
+            _pin.Enabled = canCreate;
+            _again.Enabled = canCreate;
+            if (!canCreate)
+            {
+                _pin.Clear();
+                _again.Clear();
+            }
+            _changePin.Visible = hasKey;
+            AcceptButton = hasKey ? _changePin : _create;
+        }
+
+        private void ChangePin()
+        {
+            DriveItem d = _drives.SelectedItem as DriveItem;
+            if (d == null)
+            {
+                return;
+            }
+            using (ChangePinForm f = new ChangePinForm(d.Root))
+            {
+                f.ShowDialog(this);
+            }
+            UpdateState();
         }
 
         private void ShowMessage(string text, bool isProblem)
@@ -246,7 +280,15 @@ namespace PlugPass
             try
             {
                 Cursor = Cursors.WaitCursor;
-                KeyFile.Create(d.Root, _pin.Text);
+                using (KeyLock held = KeyLock.Acquire(5000))
+                {
+                    if (held == null)
+                    {
+                        ShowMessage("A PlugPass PIN window is open. Finish or close it first.", true);
+                        return;
+                    }
+                    KeyFile.Create(d.Root, _pin.Text);
+                }
             }
             catch (Exception ex)
             {
