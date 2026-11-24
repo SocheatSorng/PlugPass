@@ -1,0 +1,7 @@
+# gitleaks: findings checked by hand and ignored by exact fingerprint (commit:file:rule:line).
+#
+# extension/manifest.json "key" is the extension's PUBLIC key (RSA SubjectPublicKeyInfo). Chrome uses it
+# to give the extension a fixed ID, which the native messaging host's allowed_origins depends on. It is
+# public by design; the private half was never kept. Only this one finding is ignored: a changed key
+# line, or the value anywhere else, is reported again.
+4e54d062a73b166a842c951f734ccb22b8b650ff:extension/manifest.json:generic-api-key:7
