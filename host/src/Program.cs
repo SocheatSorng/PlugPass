@@ -4,6 +4,7 @@ using System.IO;
 namespace PlugPass
 {
     // PlugPass helper app.
+    //   PlugPass [setup]                      setup window: make a USB drive your PlugPass key
     //   PlugPass version                      print the version
     //   PlugPass create-key <drive>           make a PlugPass key on a USB drive; stdin: PIN, PIN again
     //   PlugPass change-pin <drive>           stdin: current PIN, new PIN, new PIN again
@@ -21,6 +22,10 @@ namespace PlugPass
         [STAThread]
         private static int Main(string[] args)
         {
+            if (args.Length == 0 || (args.Length == 1 && args[0] == "setup"))
+            {
+                return SetupForm.Run();
+            }
             if (args.Length == 1 && (args[0] == "version" || args[0] == "--version"))
             {
                 Console.WriteLine("PlugPass " + Version);
@@ -48,7 +53,7 @@ namespace PlugPass
                 return UnlockCheck(args[1]);
             }
 #endif
-            Console.Error.WriteLine("Usage: PlugPass version | create-key <drive> | change-pin <drive> | key-info <drive>");
+            Console.Error.WriteLine("Usage: PlugPass [setup] | version | create-key <drive> | change-pin <drive> | key-info <drive>");
             return 2;
         }
 
