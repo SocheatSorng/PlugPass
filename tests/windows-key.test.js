@@ -92,6 +92,20 @@ test("remove: the PC half and the drive file are both deleted", () => {
   assert.equal(run(["windows-check", drive]).code, 6);
 });
 
+test("lost drive: 'remove for all drives' deletes every PC half, so no drive signs in", () => {
+  const a = join(out, "lost-a");
+  const b = join(out, "lost-b");
+  for (const d of [a, b]) {
+    mkdirSync(d, { recursive: true });
+    assert.equal(run(["enrol-windows", d], `${FAKE_PASSWORD}\r\n`).code, 0);
+  }
+  const r = run(["remove-windows", "--all"]);
+  assert.equal(r.code, 0, r.err);
+  assert.deepEqual(blobs(), []);
+  assert.equal(run(["windows-check", a]).code, 6);
+  assert.equal(run(["windows-check", b]).code, 6);
+});
+
 test("the real build needs admin rights and checks the password with Windows", () => {
   // These tests run unelevated, so the real build refuses before reading any password.
   const r = run(["enrol-windows", drive], `${FAKE_PASSWORD}\r\n`, realExe);

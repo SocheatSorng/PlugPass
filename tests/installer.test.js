@@ -58,6 +58,10 @@ test("install: program files, browser registration, uninstall entry, Start menu 
   assert.ok(existsSync(installedExe));
   assert.ok(existsSync(join(installDir, "extension", "manifest.json")));
   assert.ok(existsSync(join(installDir, "extension", "src", "inject.js")));
+  assert.ok(
+    existsSync(join(installDir, "PlugPassCredProv.dll")),
+    "sign-in tile travels with the app",
+  );
   const manifestPath = join(installDir, "com.plugpass.host.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   assert.deepEqual(manifest, {

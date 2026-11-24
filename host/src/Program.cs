@@ -84,7 +84,25 @@ namespace PlugPass
             }
             if (args.Length == 2 && args[0] == "remove-windows")
             {
-                return RemoveWindows(args[1]);
+                return RemoveWindows(args[1] == "--all" ? null : args[1]);
+            }
+            if (args.Length == 1 && (args[0] == "install-tile" || args[0] == "uninstall-tile"))
+            {
+                return TileCommand(args[0] == "install-tile");
+            }
+            if (args.Length == 3 && args[0] == "windows-setup")
+            {
+                // Started elevated by the setup window: windows-setup F: <user>   (or "none": no drive)
+                string root = args[1] == "none" ? null : (args[1].Length == 2 && args[1][1] == ':' ? args[1] + "\\" : args[1]);
+                if (root != null && !Drives.IsAllowedTarget(root))
+                {
+                    return Fail(7, "Not a removable drive: " + root);
+                }
+                if (!WindowsKey.IsElevated())
+                {
+                    return Fail(9, "Needs administrator rights.");
+                }
+                return WindowsSignInForm.Run(root, args[2]);
             }
             bool quiet = Array.IndexOf(args, "--quiet") >= 0;
             if (args.Length >= 1 && args.Length <= 2 && args[0] == "install" && (args.Length == 1 || quiet))
@@ -227,7 +245,14 @@ namespace PlugPass
             }
             try
             {
-                WindowsKey.Remove(root);
+                if (root == null)
+                {
+                    WindowsKey.RemoveAll(); // lost drive: this PC's halves go, so no drive signs in
+                }
+                else
+                {
+                    WindowsKey.Remove(root);
+                }
             }
             catch (IOException ex)
             {
@@ -237,7 +262,41 @@ namespace PlugPass
             {
                 return Fail(6, "Couldn't remove: " + ex.Message);
             }
-            Console.WriteLine("Windows sign-in removed from " + root + ".");
+            Console.WriteLine(root == null ? "Windows sign-in removed for all drives." : "Windows sign-in removed from " + root + ".");
+            return 0;
+        }
+
+        // Installs or removes the Windows sign-in tile (Program Files + HKLM). Needs admin rights.
+        private static int TileCommand(bool install)
+        {
+            bool testHome = false;
+#if TESTHOOKS
+            testHome = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PLUGPASS_HOME"));
+#endif
+            if (!testHome && !WindowsKey.IsElevated())
+            {
+                return Fail(9, "Needs administrator rights.");
+            }
+            try
+            {
+                if (install)
+                {
+                    TileInstaller.Install();
+                }
+                else
+                {
+                    TileInstaller.Uninstall();
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!(ex is IOException || ex is UnauthorizedAccessException || ex is InvalidOperationException))
+                {
+                    throw;
+                }
+                return Fail(6, (install ? "Install" : "Uninstall") + " of the sign-in tile failed: " + ex.Message);
+            }
+            Console.WriteLine(install ? "Sign-in tile installed: " + TileInstaller.Dll : "Sign-in tile removed.");
             return 0;
         }
 

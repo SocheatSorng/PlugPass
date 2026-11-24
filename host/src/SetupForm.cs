@@ -15,6 +15,7 @@ namespace PlugPass
         private readonly Label _message;
         private readonly Button _create;
         private readonly Button _changePin;
+        private readonly Button _windows;
 
         internal SetupForm()
         {
@@ -133,10 +134,17 @@ namespace PlugPass
             _changePin.Margin = new Padding(8, 0, 0, 0);
             _changePin.Visible = false;
             _changePin.Click += delegate { ChangePin(); };
+            _windows = new Button();
+            _windows.Text = "Windows sign-in...";
+            _windows.AutoSize = true;
+            _windows.MinimumSize = new Size(88, 28);
+            _windows.Margin = new Padding(8, 0, 0, 0);
+            _windows.Click += delegate { OpenWindowsSignIn(); };
             PinForm.SameWidth(_create, close, _changePin);
             buttons.Controls.Add(close);
             buttons.Controls.Add(_create);
             buttons.Controls.Add(_changePin);
+            buttons.Controls.Add(_windows);
             layout.Controls.Add(buttons);
             layout.SetColumnSpan(buttons, 2);
 
@@ -225,7 +233,28 @@ namespace PlugPass
                 _again.Clear();
             }
             _changePin.Visible = hasKey;
+            _windows.Enabled = Installer.RunningInstalledCopy; // also without a drive: "turn off for all drives"
             AcceptButton = hasKey ? _changePin : _create;
+        }
+
+        // Opens the Windows sign-in window with admin rights (one UAC prompt). The user to sign in is
+        // the one running this window, passed along in case the admin approving the prompt is someone else.
+        private void OpenWindowsSignIn()
+        {
+            DriveItem d = _drives.SelectedItem as DriveItem;
+            string drive = d == null ? "none" : d.Root.TrimEnd('\\');
+            System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(
+                Installer.CurrentExe, "windows-setup " + drive + " \"" + Environment.UserName + "\"");
+            psi.UseShellExecute = true;
+            psi.Verb = "runas";
+            try
+            {
+                System.Diagnostics.Process.Start(psi);
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // The UAC prompt was declined: nothing to do.
+            }
         }
 
         private void ChangePin()

@@ -100,6 +100,12 @@ namespace PlugPass
             {
                 MoveAsideIfInUse(InstalledExe);
                 File.Copy(source, InstalledExe, true);
+                // The sign-in tile travels with the app; "Windows sign-in" copies it to Program Files.
+                string tile = Path.Combine(Path.GetDirectoryName(source), TileInstaller.DllName);
+                if (File.Exists(tile))
+                {
+                    File.Copy(tile, Path.Combine(InstallDir, TileInstaller.DllName), true);
+                }
             }
             if (!SamePath(sourceExtension, ExtensionDir))
             {
@@ -156,6 +162,7 @@ namespace PlugPass
             RefuseLink(InstallDir);
             DeleteTree(ExtensionDir);
             DeleteIfExists(Path.Combine(InstallDir, HostName + ".json"));
+            DeleteIfExists(Path.Combine(InstallDir, TileInstaller.DllName));
             foreach (string old in Directory.GetFiles(InstallDir, "PlugPass.old-*.exe"))
             {
                 TryDelete(old);
@@ -322,26 +329,36 @@ namespace PlugPass
 
     internal static class RegistryStore
     {
-        internal static IRegistryStore Open()
+        // machine = HKLM (64-bit view, needs admin rights); otherwise HKCU.
+        internal static IRegistryStore Open(bool machine = false)
         {
 #if TESTHOOKS
             string home = Environment.GetEnvironmentVariable("PLUGPASS_HOME");
             if (!string.IsNullOrEmpty(home))
             {
-                return new FileRegistry(Path.Combine(home, "registry.json"));
+                return new FileRegistry(Path.Combine(home, machine ? "registry-machine.json" : "registry.json"));
             }
             throw new InvalidOperationException("The test build only installs with PLUGPASS_HOME set.");
 #else
-            return new CurrentUserRegistry();
+            return new HiveRegistry(machine
+                ? RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64)
+                : Registry.CurrentUser);
 #endif
         }
     }
 
-    internal sealed class CurrentUserRegistry : IRegistryStore
+    internal sealed class HiveRegistry : IRegistryStore
     {
+        private readonly RegistryKey _hive;
+
+        internal HiveRegistry(RegistryKey hive)
+        {
+            _hive = hive;
+        }
+
         public void SetDefault(string subKey, string value)
         {
-            using (RegistryKey k = Registry.CurrentUser.CreateSubKey(subKey))
+            using (RegistryKey k = _hive.CreateSubKey(subKey))
             {
                 k.SetValue("", value, RegistryValueKind.String);
             }
@@ -349,7 +366,7 @@ namespace PlugPass
 
         public void SetValues(string subKey, Dictionary<string, object> values)
         {
-            using (RegistryKey k = Registry.CurrentUser.CreateSubKey(subKey))
+            using (RegistryKey k = _hive.CreateSubKey(subKey))
             {
                 foreach (KeyValuePair<string, object> v in values)
                 {
@@ -360,8 +377,123 @@ namespace PlugPass
 
         public void DeleteKey(string subKey)
         {
-            Registry.CurrentUser.DeleteSubKeyTree(subKey, false);
+            _hive.DeleteSubKeyTree(subKey, false);
         }
+    }
+
+    // The Windows sign-in tile. The sign-in screen runs as SYSTEM and loads this DLL, so it lives in
+    // %ProgramFiles%\PlugPass (only administrators can change it) and is registered in HKLM.
+    // Install and Uninstall need admin rights (the test build: PLUGPASS_HOME, fake registry).
+    internal static class TileInstaller
+    {
+        internal const string Clsid = "{9170534E-8919-480A-A99A-4EF4979FE7A3}";
+        internal const string DllName = "PlugPassCredProv.dll";
+        internal const string ProviderKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\" + Clsid;
+        internal const string ClsidKey = @"SOFTWARE\Classes\CLSID\" + Clsid;
+
+        internal static string Dir
+        {
+            get
+            {
+#if TESTHOOKS
+                string home = Environment.GetEnvironmentVariable("PLUGPASS_HOME");
+                if (!string.IsNullOrEmpty(home))
+                {
+                    return Path.Combine(Path.Combine(home, "ProgramFiles"), "PlugPass");
+                }
+#endif
+                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PlugPass");
+            }
+        }
+
+        internal static string Dll
+        {
+            get { return Path.Combine(Dir, DllName); }
+        }
+
+        internal static bool IsInstalled
+        {
+            get { return File.Exists(Dll); }
+        }
+
+        // Copies the tile next to the running exe into Program Files and registers it.
+        internal static void Install()
+        {
+            IRegistryStore reg = RegistryStore.Open(true); // first: the test build refuses before touching anything
+            string source = Path.Combine(Path.GetDirectoryName(Installer.CurrentExe), DllName);
+            if (!File.Exists(source))
+            {
+                throw new IOException(DllName + " wasn't found next to PlugPass.exe.");
+            }
+            Directory.CreateDirectory(Dir);
+            if ((File.GetAttributes(Dir) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException("The PlugPass folder in Program Files is a link; refusing to change it.");
+            }
+            if (!Installer.SamePath(source, Dll))
+            {
+                // The sign-in screen may have the old DLL loaded: Windows lets us rename it, then copy.
+                foreach (string old in Directory.GetFiles(Dir, "PlugPassCredProv.old-*.dll"))
+                {
+                    try
+                    {
+                        File.Delete(old);
+                    }
+                    catch (IOException)
+                    {
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                    }
+                }
+                if (File.Exists(Dll))
+                {
+                    File.Move(Dll, Path.Combine(Dir, "PlugPassCredProv.old-" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".dll"));
+                }
+                File.Copy(source, Dll);
+            }
+            reg.SetDefault(ClsidKey, "PlugPass");
+            Dictionary<string, object> server = new Dictionary<string, object>();
+            server[""] = Dll;
+            server["ThreadingModel"] = "Apartment";
+            reg.SetValues(ClsidKey + @"\InprocServer32", server);
+            reg.SetDefault(ProviderKey, "PlugPass"); // last: the sign-in screen starts using it from here
+        }
+
+        // Unregisters first (the sign-in screen stops loading it), then removes the files. A DLL still
+        // loaded by the sign-in screen is removed at the next restart.
+        internal static void Uninstall()
+        {
+            IRegistryStore reg = RegistryStore.Open(true);
+            reg.DeleteKey(ProviderKey);
+            reg.DeleteKey(ClsidKey);
+            if (!Directory.Exists(Dir) || (File.GetAttributes(Dir) & FileAttributes.ReparsePoint) != 0)
+            {
+                return;
+            }
+            foreach (string f in Directory.GetFiles(Dir, "PlugPassCredProv*.dll"))
+            {
+                try
+                {
+                    File.Delete(f);
+                }
+                catch (Exception ex)
+                {
+                    if (!(ex is IOException || ex is UnauthorizedAccessException))
+                    {
+                        throw;
+                    }
+                    MoveFileEx(f, null, 0x4); // MOVEFILE_DELAY_UNTIL_REBOOT
+                }
+            }
+            if (Directory.GetFileSystemEntries(Dir).Length == 0)
+            {
+                Directory.Delete(Dir);
+            }
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        private static extern bool MoveFileEx(string existing, string replacement, int flags);
     }
 
 #if TESTHOOKS
@@ -396,8 +528,15 @@ namespace PlugPass
 
         public void DeleteKey(string subKey)
         {
+            // Like RegistryKey.DeleteSubKeyTree: the key and everything below it.
             Dictionary<string, object> all = Load();
-            all.Remove(subKey);
+            foreach (string key in new List<string>(all.Keys))
+            {
+                if (key == subKey || key.StartsWith(subKey + "\\", StringComparison.Ordinal))
+                {
+                    all.Remove(key);
+                }
+            }
             File.WriteAllText(_path, Json.Write(all));
         }
 

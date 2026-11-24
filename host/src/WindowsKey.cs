@@ -57,6 +57,25 @@ namespace PlugPass
             return File.Exists(DrivePath(root));
         }
 
+        // Lost drive: deletes this PC's half of every enrolment, so no drive can sign in any more.
+        internal static void RemoveAll()
+        {
+            if (!Directory.Exists(ProtectedDir))
+            {
+                return;
+            }
+            foreach (string f in Directory.GetFiles(ProtectedDir, "*.bin"))
+            {
+                File.Delete(f);
+            }
+        }
+
+        // Whether any drive still signs in on this PC (the sign-in tile is only needed then).
+        internal static bool AnyEnrolments()
+        {
+            return Directory.Exists(ProtectedDir) && Directory.GetFiles(ProtectedDir, "*.bin").Length > 0;
+        }
+
         // Stores the password for `user` so this drive can sign them in. Replaces this drive's earlier
         // enrolment. Requires admin rights (writes the protected folder), except in the test build.
         internal static void Enrol(string root, string user, string password)

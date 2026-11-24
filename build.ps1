@@ -65,6 +65,7 @@ $zip = Join-Path $root "dist\PlugPass-$version.zip"
 if (Test-Path (Join-Path $root 'dist')) { Remove-Item -Recurse -Force (Join-Path $root 'dist') }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item (Join-Path $root 'bin\PlugPass.exe') $stage
+Copy-Item (Join-Path $root 'bin\PlugPassCredProv.dll') $stage
 Copy-Item $ext (Join-Path $stage 'extension') -Recurse
 # Entries named with '/' (the zip standard); Windows PowerShell's zip helpers write '\'.
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
