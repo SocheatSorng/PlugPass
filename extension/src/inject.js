@@ -47,20 +47,13 @@
     if (options.mediation === "conditional") {
       return "passkey autofill (conditional mediation)";
     }
-    if (kind === "create") {
-      const sel = pk.authenticatorSelection || {};
-      if (sel.authenticatorAttachment === "platform")
-        return "site wants this device's own authenticator";
-      if (sel.residentKey === "required" || sel.requireResidentKey === true) {
-        return "site wants a passkey stored on the key (residentKey: required)";
-      }
-      if (sel.userVerification === "required")
-        return "site wants a PIN (userVerification: required)";
-      return "";
-    }
-    if (pk.userVerification === "required") return "site wants a PIN (userVerification: required)";
-    if (!Array.isArray(pk.allowCredentials) || pk.allowCredentials.length === 0) {
-      return "site wants a passkey stored on the key (no allowCredentials)";
+    // Passkeys and PIN-verified requests are served by the drive (phase 2); with no drive plugged
+    // in, the helper app hands them back silently.
+    if (
+      kind === "create" &&
+      (pk.authenticatorSelection || {}).authenticatorAttachment === "platform"
+    ) {
+      return "site wants this device's own authenticator";
     }
     return "";
   }

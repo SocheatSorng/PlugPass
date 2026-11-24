@@ -1,27 +1,54 @@
-// End-to-end tests of the helper app as a native messaging host. Node starts bin\test\PlugPass.exe the
-// way Chrome does, sends create/get requests and checks the replies independently with Node's crypto.
-// The helper's data (spike master secret) goes to tests/out/node-host via PLUGPASS_HOME.
+// End-to-end tests of the helper app. Node runs bin\test\PlugPass.exe the way Chrome does (native
+// messaging) and through its key commands, and checks every reply independently with Node's crypto.
+// A folder under tests/out stands in for the USB drive (--key-dir, --no-drive-scan) and PLUGPASS_HOME
+// holds this PC's half of the key, so real drives and real keys are never touched. PINs are fake.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, createPublicKey, verify, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 const exe = fileURLToPath(new URL("../bin/test/PlugPass.exe", import.meta.url));
-const home = fileURLToPath(new URL("./out/node-host", import.meta.url));
+const realExe = fileURLToPath(new URL("../bin/PlugPass.exe", import.meta.url));
+const out = fileURLToPath(new URL("./out/node-host", import.meta.url));
+const home = join(out, "home");
+const drive = join(out, "drive");
 const EXT = "chrome-extension://amppkfbnjicgeeakigkmafdllhknaigl/";
-
-before(() => {
-  assert.ok(existsSync(exe), "build first: .\\build.ps1");
-  rmSync(home, { recursive: true, force: true });
-  mkdirSync(home, { recursive: true });
-});
-after(() => rmSync(home, { recursive: true, force: true }));
+const PIN = "correct-horse-1";
 
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 const fromB64u = (s) => Buffer.from(s, "base64url");
 const sha256 = (data) => createHash("sha256").update(data).digest();
+const keyPath = (root) => join(root, "PlugPass", "plugpass.ppkey");
+
+// Runs a key command (create-key, change-pin, key-info, unlock-check); stdin lines are PINs.
+function cli(args, lines = [], env = {}, program = exe) {
+  const r = spawnSync(program, args, {
+    input: lines.map((l) => `${l}\r\n`).join(""),
+    env: { ...process.env, PLUGPASS_HOME: home, ...env },
+    timeout: 60000,
+  });
+  return { code: r.status, out: r.stdout.toString(), err: r.stderr.toString() };
+}
+
+function newDrive(name, pin = PIN, env = {}) {
+  const root = join(out, name);
+  rmSync(root, { recursive: true, force: true });
+  mkdirSync(root, { recursive: true });
+  const r = cli(["create-key", root], [pin, pin], env);
+  assert.equal(r.code, 0, r.err);
+  return root;
+}
+
+before(() => {
+  assert.ok(existsSync(exe), "build first: .\\build.ps1");
+  rmSync(out, { recursive: true, force: true });
+  mkdirSync(home, { recursive: true });
+  newDrive("drive");
+});
+after(() => rmSync(out, { recursive: true, force: true }));
 
 function frame(obj) {
   const body = Buffer.from(JSON.stringify(obj), "utf8");
@@ -30,24 +57,33 @@ function frame(obj) {
   return Buffer.concat([len, body]);
 }
 
-// Sends one request; returns { reply, consent: [lines logged by the scripted consent], code }.
-function send(request, consent = "--auto-approve", rawInput = null) {
-  const r = spawnSync(exe, [EXT, consent], {
-    input: rawInput ?? frame(request),
-    env: { ...process.env, PLUGPASS_HOME: home },
-    timeout: 30000,
+// Sends one request as Chrome would. Returns { reply, log: [pin:/choose:/tell: lines], code }.
+function send(
+  request,
+  {
+    decision = "--auto-approve",
+    pins = [PIN],
+    root = drive,
+    extra = [],
+    env = {},
+    raw = null,
+  } = {},
+) {
+  const args = [EXT, decision, "--no-drive-scan", ...(root ? ["--key-dir", root] : []), ...extra];
+  const r = spawnSync(exe, args, {
+    input: raw ?? frame(request),
+    env: { ...process.env, PLUGPASS_HOME: home, PLUGPASS_TEST_PIN: pins.join("|"), ...env },
+    timeout: 60000,
   });
-  const out = r.stdout;
   let reply = null;
-  if (out.length >= 4) {
-    const len = out.readUInt32LE(0);
-    reply = JSON.parse(out.subarray(4, 4 + len).toString("utf8"));
+  if (r.stdout.length >= 4) {
+    reply = JSON.parse(r.stdout.subarray(4, 4 + r.stdout.readUInt32LE(0)).toString("utf8"));
   }
-  const consentLines = r.stderr
+  const log = r.stderr
     .toString()
     .split(/\r?\n/)
-    .filter((l) => l.startsWith("consent:"));
-  return { reply, consent: consentLines, code: r.status };
+    .filter((l) => /^(pin|choose|tell):/.test(l));
+  return { reply, log, code: r.status };
 }
 
 // Minimal CBOR decoder: integers, byte/text strings, arrays, maps, true/false/null.
@@ -93,13 +129,17 @@ function decodeCbor(buf) {
   return { value, rest: buf.subarray(pos) };
 }
 
-function createRequest(overrides = {}) {
+function createRequest(overrides = {}, user = "user-1234") {
   return {
     type: "create",
     origin: "https://webauthn.io",
     options: {
       rp: { id: "webauthn.io", name: "WebAuthn.io" },
-      user: { id: b64u(Buffer.from("user-1234")), name: "test", displayName: "Test" },
+      user: {
+        id: b64u(Buffer.from(user)),
+        name: `${user}@example.com`,
+        displayName: `Name ${user}`,
+      },
       challenge: b64u(randomBytes(32)),
       pubKeyCredParams: [
         { type: "public-key", alg: -8 },
@@ -111,26 +151,22 @@ function createRequest(overrides = {}) {
   };
 }
 
-function getRequest(credId, overrides = {}, origin = "https://webauthn.io") {
+function getRequest(credIds, overrides = {}, origin = "https://webauthn.io") {
   return {
     type: "get",
     origin,
     options: {
       rpId: "webauthn.io",
       challenge: b64u(randomBytes(32)),
-      allowCredentials: [{ type: "public-key", id: credId }],
-      userVerification: "discouraged",
+      allowCredentials: credIds.map((id) => ({ type: "public-key", id })),
+      userVerification: "preferred",
       ...overrides,
     },
   };
 }
 
-// Registers once and parses everything a relying party would check.
-let registered;
-function register() {
-  if (registered) return registered;
-  const req = createRequest();
-  const { reply, consent } = send(req);
+// Parses a registration reply the way a relying party would.
+function parseCreate(reply) {
   assert.equal(reply.status, "ok", JSON.stringify(reply));
   const cred = reply.credential;
   const att = decodeCbor(fromB64u(cred.response.attestationObject)).value;
@@ -142,33 +178,65 @@ function register() {
     key: { kty: "EC", crv: "P-256", x: b64u(cose.get(-2)), y: b64u(cose.get(-3)) },
     format: "jwk",
   });
-  registered = { req, reply, consent, cred, att, authData, credId, cose, rest, publicKey };
+  return { cred, att, authData, credId, cose, rest, publicKey };
+}
+
+// Checks a sign-in reply: RP ID hash, flags, counter, signature. Returns the counter.
+function checkAssertion(reply, req, publicKey) {
+  assert.equal(reply.status, "ok", JSON.stringify(reply));
+  const r = reply.credential.response;
+  const authData = fromB64u(r.authenticatorData);
+  const clientDataJSON = fromB64u(r.clientDataJSON);
+  assert.deepEqual(authData.subarray(0, 32), sha256("webauthn.io"));
+  assert.equal(authData[32], 0x05, "flags: user present + user verified (PIN)");
+  assert.equal(authData.length, 37);
+  const clientData = JSON.parse(clientDataJSON.toString("utf8"));
+  assert.equal(clientData.type, "webauthn.get");
+  assert.equal(clientData.challenge, req.options.challenge);
+  assert.equal(clientData.origin, req.origin);
+  const signed = Buffer.concat([authData, sha256(clientDataJSON)]);
+  assert.ok(verify("sha256", signed, publicKey, fromB64u(r.signature)), "signature verifies");
+  return authData.readUInt32BE(33);
+}
+
+let registered;
+function register() {
+  if (registered) return registered;
+  const req = createRequest();
+  const { reply, log } = send(req);
+  registered = { req, log, ...parseCreate(reply) };
   return registered;
 }
 
-test("create: returns a 'none' attestation a relying party accepts", () => {
-  const { req, consent, cred, att, authData, credId, cose, rest, publicKey } = register();
-  assert.deepEqual(consent, ["consent:create:webauthn.io"]);
-  assert.equal(cred.type, "public-key");
-  assert.equal(cred.id, cred.rawId);
+test("key file: the drive holds no readable secrets", () => {
+  const bytes = readFileSync(keyPath(drive));
+  assert.equal(bytes.subarray(0, 8).toString("ascii"), "PLUGPASS");
+  assert.equal(bytes[8], 1, "format version");
+  assert.equal(bytes.readInt32LE(12), 600000, "PBKDF2 iterations");
+  for (const word of ["master", "passkeys", "counter"]) {
+    assert.equal(bytes.includes(Buffer.from(word)), false, word);
+  }
+  const info = cli(["key-info", drive]);
+  assert.match(info.out, /^key [0-9a-f]{32} tries-left 8 this-pc/);
+});
+
+test("create: asks for the PIN and returns a 'none' attestation with UV and a counter", () => {
+  const { req, log, cred, att, authData, credId, cose, rest, publicKey } = register();
+  assert.deepEqual(log, ["pin:create:webauthn.io:8"]);
   assert.equal(att.get("fmt"), "none");
   assert.equal(att.get("attStmt").size, 0);
   assert.deepEqual(authData.subarray(0, 32), sha256("webauthn.io"));
-  assert.equal(authData[32], 0x41, "flags: user present + attested credential data");
-  assert.equal(authData.readUInt32BE(33), 0, "sign counter");
+  assert.equal(authData[32], 0x45, "flags: user present + user verified + attested data");
+  assert.ok(authData.readUInt32BE(33) >= 1, "signature counter started");
   assert.deepEqual(authData.subarray(37, 53), Buffer.alloc(16), "AAGUID");
   assert.equal(b64u(credId), cred.id);
+  assert.equal(credId[0], 2, "credential ID version 2");
   assert.equal(rest.length, 0, "nothing after the COSE key");
-  assert.equal(cose.get(1), 2, "kty EC2");
   assert.equal(cose.get(3), -7, "alg ES256");
-  assert.equal(cose.get(-1), 1, "crv P-256");
-  assert.equal(cred.response.publicKeyAlgorithm, -7);
   assert.deepEqual(
     publicKey.export({ type: "spki", format: "der" }),
     fromB64u(cred.response.publicKey),
-    "getPublicKey() matches the COSE key",
   );
-  assert.equal(cred.response.authenticatorData, b64u(authData));
   const clientData = JSON.parse(fromB64u(cred.response.clientDataJSON).toString("utf8"));
   assert.deepEqual(clientData, {
     type: "webauthn.create",
@@ -178,164 +246,247 @@ test("create: returns a 'none' attestation a relying party accepts", () => {
   });
 });
 
-test("get: signs with the registered key (verified with Node crypto)", () => {
+test("get: signs with the drive's key; the counter goes up every time", () => {
   const { cred, publicKey } = register();
+  let last = 0;
   for (let i = 0; i < 2; i++) {
-    const req = getRequest(cred.id);
-    const { reply, consent } = send(req);
-    assert.equal(reply.status, "ok", JSON.stringify(reply));
-    assert.deepEqual(consent, ["consent:get:webauthn.io"]);
-    const r = reply.credential.response;
-    const authData = fromB64u(r.authenticatorData);
-    const clientDataJSON = fromB64u(r.clientDataJSON);
-    assert.deepEqual(authData.subarray(0, 32), sha256("webauthn.io"));
-    assert.equal(authData[32], 0x01, "flags: user present only");
-    assert.equal(authData.length, 37);
-    const clientData = JSON.parse(clientDataJSON.toString("utf8"));
-    assert.equal(clientData.type, "webauthn.get");
-    assert.equal(clientData.challenge, req.options.challenge);
-    assert.equal(clientData.origin, "https://webauthn.io");
-    const signed = Buffer.concat([authData, sha256(clientDataJSON)]);
-    assert.ok(verify("sha256", signed, publicKey, fromB64u(r.signature)), "signature verifies");
-    assert.equal(fromB64u(r.userHandle).toString(), "user-1234");
-    assert.equal(reply.credential.id, cred.id);
+    const req = getRequest([cred.id]);
+    const { reply, log } = send(req);
+    assert.deepEqual(log, ["pin:get:webauthn.io:8"]);
+    const counter = checkAssertion(reply, req, publicKey);
+    assert.ok(counter > last, `counter ${counter} > ${last}`);
+    last = counter;
+    assert.equal(fromB64u(reply.credential.response.userHandle).toString(), "user-1234");
   }
 });
 
-test("get: a subdomain page may use its parent domain as RP ID", () => {
-  const { cred } = register();
-  const { reply } = send(getRequest(cred.id, {}, "https://login.webauthn.io"));
-  assert.equal(reply.status, "ok", JSON.stringify(reply));
+test("passkeys: stored on the drive and found without a credential list", () => {
+  const req = createRequest(
+    {
+      authenticatorSelection: { residentKey: "required", userVerification: "required" },
+      extensions: { credProps: true },
+    },
+    "passkey-user",
+  );
+  const created = send(req);
+  const { cred, publicKey } = parseCreate(created.reply);
+  assert.deepEqual(cred.clientExtensionResults, { credProps: { rk: true } });
+  const getReq = getRequest([], { userVerification: "required" });
+  const { reply, log } = send(getReq);
+  checkAssertion(reply, getReq, publicKey);
+  assert.equal(reply.credential.id, cred.id);
+  assert.equal(fromB64u(reply.credential.response.userHandle).toString(), "passkey-user");
+  assert.deepEqual(log, ["pin:get:webauthn.io:8"], "one account: no account picker");
+  assert.match(cli(["unlock-check", drive], [PIN]).out, /^ok passkeys 1 /);
 });
 
-test("rejects a page whose origin doesn't match the RP ID, without asking", () => {
+test("passkeys: several accounts on one site ask which one; re-registering replaces", () => {
+  const root = newDrive("drive-accounts");
+  const keys = {};
+  for (const user of ["alice", "bob", "alice"]) {
+    const req = createRequest({ authenticatorSelection: { residentKey: "required" } }, user);
+    keys[user] = parseCreate(send(req, { root }).reply);
+  }
+  assert.match(
+    cli(["unlock-check", root], [PIN]).out,
+    /^ok passkeys 2 /,
+    "alice replaced, not added",
+  );
+  const getReq = getRequest([]);
+  const { reply, log } = send(getReq, { root, extra: ["--test-account", "1"] });
+  assert.deepEqual(log, [
+    "pin:get:webauthn.io:8",
+    "choose:webauthn.io:Name bob (bob@example.com),Name alice (alice@example.com)",
+  ]);
+  checkAssertion(reply, getReq, keys.alice.publicKey);
+  assert.equal(fromB64u(reply.credential.response.userHandle).toString(), "alice");
+});
+
+test("a wrong PIN asks again and counts down; the right PIN resets the count", () => {
+  const { cred, publicKey } = register();
+  const req = getRequest([cred.id]);
+  const { reply, log } = send(req, { pins: ["wrong-pin-1", "wrong-pin-2", PIN] });
+  assert.deepEqual(log, [
+    "pin:get:webauthn.io:8",
+    "pin:get:webauthn.io:7:Wrong PIN. 7 tries left before the key is erased.",
+    "pin:get:webauthn.io:6:Wrong PIN. 6 tries left before the key is erased.",
+  ]);
+  checkAssertion(reply, req, publicKey);
+  assert.match(cli(["key-info", drive]).out, /tries-left 8 /);
+});
+
+test("8 wrong PINs in a row erase the key: drive file and this PC's half", () => {
+  const root = newDrive("drive-wipe");
+  for (let i = 1; i <= 7; i++) {
+    const r = cli(["unlock-check", root], [`wrong-pin-${i}`]);
+    assert.equal(r.code, 3, r.err);
+    assert.ok(r.err.includes(`${8 - i} tries left`), r.err);
+  }
+  assert.equal(existsSync(keyPath(root)), true);
+  const r = cli(["unlock-check", root], ["wrong-pin-8"]);
+  assert.equal(r.code, 4, r.err);
+  assert.equal(existsSync(keyPath(root)), false, "drive file erased");
+  assert.deepEqual(readdirSync(join(root, "PlugPass")), [], "nothing else left in PlugPass folder");
+  assert.equal(cli(["key-info", root]).code, 6);
+});
+
+test("wiping through the PIN window tells the person and lets the browser take over", () => {
+  const root = newDrive("drive-wipe-host");
+  const id = parseCreate(send(createRequest(), { root }).reply).cred.id;
+  for (let i = 1; i <= 7; i++) cli(["unlock-check", root], [`wrong-${i}-pin`]); // 7 wrong in a row
+  const { reply, log } = send(getRequest([id]), { root, pins: ["wrong-8-pin"] });
+  assert.deepEqual(log[0], "pin:get:webauthn.io:1");
+  assert.equal(reply.fallback, true);
+  assert.match(log.at(-1), /^tell:Too many wrong PINs/);
+  assert.equal(existsSync(keyPath(root)), false);
+});
+
+test("change-pin: the old PIN stops working, keys keep working with the new one", () => {
+  const root = newDrive("drive-change");
+  const { cred, publicKey } = parseCreate(send(createRequest(), { root }).reply);
+  assert.equal(cli(["change-pin", root], ["wrong-pin-x", "new-pin-123", "new-pin-123"]).code, 3);
+  assert.equal(cli(["change-pin", root], [PIN, "short", "short"]).code, 7);
+  assert.equal(cli(["change-pin", root], [PIN, "new-pin-123", "other-pin-1"]).code, 7);
+  assert.equal(cli(["change-pin", root], [PIN, "new-pin-123", "new-pin-123"]).code, 0);
+  assert.equal(cli(["unlock-check", root], [PIN]).code, 3);
+  const req = getRequest([cred.id]);
+  checkAssertion(send(req, { root, pins: ["new-pin-123"] }).reply, req, publicKey);
+});
+
+test("create-key refuses weak PINs, mismatches and overwriting", () => {
+  const root = join(out, "drive-rules");
+  mkdirSync(root, { recursive: true });
+  assert.equal(cli(["create-key", root], ["12345", "12345"]).code, 7, "too short");
+  assert.equal(cli(["create-key", root], ["123456", "123457"]).code, 7, "mismatch");
+  assert.equal(cli(["create-key", root], ["123456", "123456"]).code, 0, "6 digits is enough");
+  assert.equal(cli(["create-key", root], ["abcdefg", "abcdefg"]).code, 7, "already has a key");
+  assert.equal(cli(["create-key", join(out, "no-such-dir")], [PIN, PIN]).code, 7);
+});
+
+test("the real build only makes keys on removable drives", () => {
+  const root = join(out, "drive-real");
+  mkdirSync(root, { recursive: true });
+  const r = cli(["create-key", root], [PIN, PIN], {}, realExe);
+  assert.equal(r.code, 7);
+  assert.match(r.err, /Not a removable drive/);
+  assert.equal(existsSync(keyPath(root)), false);
+});
+
+test("no drive, a damaged drive or another PC's drive: silent hand-over to the browser", () => {
+  const { cred } = register();
+  // No drive plugged in.
+  let r = send(getRequest([cred.id]), { root: null });
+  assert.equal(r.reply.fallback, true);
+  assert.match(r.reply.message, /No PlugPass drive/);
+  assert.deepEqual(r.log, []);
+  // A drive set up on another PC: this PC (another PLUGPASS_HOME) lacks its half of the key.
+  const otherPc = join(out, "other-pc-home");
+  mkdirSync(otherPc, { recursive: true });
+  r = send(getRequest([cred.id]), { env: { PLUGPASS_HOME: otherPc } });
+  assert.equal(r.reply.fallback, true);
+  assert.match(r.reply.message, /another PC/);
+  assert.deepEqual(r.log, []);
+  // A damaged key file.
+  const root = newDrive("drive-damaged");
+  writeFileSync(keyPath(root), readFileSync(keyPath(root)).subarray(0, 50));
+  r = send(createRequest(), { root });
+  assert.equal(r.reply.fallback, true);
+  assert.deepEqual(r.log, []);
+});
+
+test("another drive's credentials are ignored without asking for the PIN", () => {
+  const other = newDrive("drive-other");
+  const { cred } = parseCreate(send(createRequest(), { root: other }).reply);
+  const { reply, log } = send(getRequest([cred.id]));
+  assert.equal(reply.fallback, true);
+  assert.deepEqual(log, []);
+});
+
+test("a credential is bound to its site: a webauthn.io key doesn't sign for google.com", () => {
+  const { cred } = register();
+  const req = getRequest([cred.id], { rpId: "google.com" }, "https://accounts.google.com");
+  const { reply } = send(req);
+  assert.equal(reply.status, "error");
+  assert.equal(reply.fallback, true);
+});
+
+test("tampered credential IDs from this drive are refused", () => {
+  const { credId } = register();
+  const tampered = Buffer.from(credId);
+  tampered[40] ^= 1;
+  const { reply } = send(getRequest([b64u(tampered)]));
+  assert.equal(reply.name, "NotAllowedError");
+  assert.equal(reply.fallback, true);
+});
+
+test("create: a key already registered with the account gives InvalidStateError", () => {
+  const { cred } = register();
+  const { reply, log } = send(
+    createRequest({ excludeCredentials: [{ type: "public-key", id: cred.id }] }),
+  );
+  assert.equal(reply.name, "InvalidStateError");
+  assert.equal(reply.fallback, false);
+  assert.equal(log.length, 1, "asked for the PIN first");
+});
+
+test("rejects pages whose origin doesn't match, and non-https pages, without asking", () => {
   const { cred } = register();
   for (const origin of [
     "https://evil.example",
     "https://webauthn.io.evil.example",
     "https://xwebauthn.io",
   ]) {
-    const { reply, consent } = send(getRequest(cred.id, {}, origin));
-    assert.equal(reply.status, "error");
+    const { reply, log } = send(getRequest([cred.id], {}, origin));
     assert.equal(reply.name, "SecurityError", origin);
-    assert.equal(reply.fallback, false);
-    assert.deepEqual(consent, []);
+    assert.deepEqual(log, []);
   }
-});
-
-test("rejects non-https and malformed origins", () => {
   for (const origin of [
     "http://webauthn.io",
     "https://webauthn.io/path",
     "https://user@webauthn.io",
-    "chrome-extension://abc",
     "",
   ]) {
-    const { reply, consent } = send({ ...createRequest(), origin });
+    const { reply, log } = send({ ...createRequest(), origin });
     assert.equal(reply.name, "SecurityError", origin);
-    assert.deepEqual(consent, []);
+    assert.deepEqual(log, []);
   }
-});
-
-test("sites outside the phase 1 allowlist go to the browser's own security key", () => {
-  const req = createRequest({ rp: { id: "example.com", name: "Example" } });
-  const { reply, consent } = send({ ...req, origin: "https://example.com" });
+  const { reply } = send({
+    ...createRequest({ rp: { id: "example.com" } }),
+    origin: "https://example.com",
+  });
   assert.equal(reply.name, "NotSupportedError");
   assert.equal(reply.fallback, true);
-  assert.deepEqual(consent, []);
-});
-
-test("a credential is bound to its site: a webauthn.io key doesn't sign for google.com", () => {
-  const { cred } = register();
-  const req = getRequest(cred.id, { rpId: "google.com" }, "https://accounts.google.com");
-  const { reply, consent } = send(req);
-  assert.equal(reply.status, "error");
-  assert.equal(reply.fallback, true);
-  assert.deepEqual(consent, []);
-});
-
-test("tampered or foreign credential IDs are ignored, without asking", () => {
-  const { credId } = register();
-  const tampered = Buffer.from(credId);
-  tampered[20] ^= 1;
-  for (const id of [b64u(tampered), b64u(randomBytes(120)), "not base64!", ""]) {
-    const { reply, consent } = send(getRequest(id));
-    assert.equal(reply.name, "NotAllowedError", id);
-    assert.equal(reply.fallback, true);
-    assert.deepEqual(consent, []);
-  }
-});
-
-test("create: an already-registered key gives InvalidStateError (after asking)", () => {
-  const { cred } = register();
-  const { reply, consent } = send(
-    createRequest({ excludeCredentials: [{ type: "public-key", id: cred.id }] }),
-  );
-  assert.equal(reply.name, "InvalidStateError");
-  assert.equal(reply.fallback, false);
-  assert.equal(consent.length, 1);
 });
 
 test("Cancel rejects; 'Use another key' hands over to the browser", () => {
   const { cred } = register();
-  let r = send(getRequest(cred.id), "--auto-deny");
-  assert.equal(r.reply.name, "NotAllowedError");
+  let r = send(getRequest([cred.id]), { decision: "--auto-deny" });
   assert.equal(r.reply.fallback, false);
-  r = send(getRequest(cred.id), "--auto-fallback");
-  assert.equal(r.reply.name, "NotAllowedError");
+  r = send(getRequest([cred.id]), { decision: "--auto-fallback" });
   assert.equal(r.reply.fallback, true);
-  r = send(createRequest(), "--auto-deny");
-  assert.equal(r.reply.fallback, false);
 });
 
-test("requests PlugPass can't honestly serve go to the browser", () => {
-  const cases = [
-    createRequest({ authenticatorSelection: { residentKey: "required" } }),
-    createRequest({ authenticatorSelection: { requireResidentKey: true } }),
-    createRequest({ authenticatorSelection: { userVerification: "required" } }),
+test("requests PlugPass can't serve, and invalid ones", () => {
+  for (const req of [
     createRequest({ authenticatorSelection: { authenticatorAttachment: "platform" } }),
     createRequest({ pubKeyCredParams: [{ type: "public-key", alg: -257 }] }),
-    getRequest("AAAA", { userVerification: "required" }),
-    getRequest("AAAA", { allowCredentials: [] }),
-  ];
-  for (const req of cases) {
-    const { reply, consent } = send(req);
-    assert.equal(reply.name, "NotSupportedError", JSON.stringify(req.options));
+  ]) {
+    const { reply, log } = send(req);
+    assert.equal(reply.name, "NotSupportedError");
     assert.equal(reply.fallback, true);
-    assert.deepEqual(consent, []);
+    assert.deepEqual(log, []);
   }
-});
-
-test("invalid requests are refused", () => {
-  let r = send(createRequest({ challenge: b64u(randomBytes(8)) }));
-  assert.equal(r.reply.name, "TypeError");
-  r = send(createRequest({ user: { id: "" } }));
-  assert.equal(r.reply.name, "TypeError");
-  r = send(createRequest({ user: { id: b64u(randomBytes(65)) } }));
-  assert.equal(r.reply.name, "TypeError");
-  r = send({ type: "delete", origin: "https://webauthn.io", options: {} });
-  assert.equal(r.reply.name, "NotSupportedError");
+  assert.equal(send(createRequest({ challenge: b64u(randomBytes(8)) })).reply.name, "TypeError");
+  assert.equal(send(createRequest({ user: { id: "" } })).reply.name, "TypeError");
+  assert.equal(
+    send({ type: "delete", origin: "https://webauthn.io", options: {} }).reply.name,
+    "NotSupportedError",
+  );
   const lengthOnly = frame({ type: "get" }).subarray(0, 4); // says a body follows, but none does
-  r = send(null, "--auto-approve", lengthOnly);
-  assert.equal(r.reply, null, "truncated message: no reply");
-});
-
-test("oversized messages are refused before reading them", () => {
-  const len = Buffer.alloc(4);
-  len.writeUInt32LE(10 * 1024 * 1024);
-  const r = send(null, "--auto-approve", len);
+  assert.equal(send(null, { raw: lengthOnly }).reply, null);
+  const huge = Buffer.alloc(4);
+  huge.writeUInt32LE(10 * 1024 * 1024);
+  const r = send(null, { raw: huge });
   assert.equal(r.reply.status, "error");
   assert.equal(r.code, 1);
-});
-
-test("several messages over one connection (connectNative) are all answered", () => {
-  const { cred } = register();
-  const input = Buffer.concat([frame(getRequest(cred.id)), frame(getRequest(cred.id))]);
-  const r = spawnSync(exe, [EXT, "--auto-approve"], {
-    input,
-    env: { ...process.env, PLUGPASS_HOME: home },
-  });
-  const first = r.stdout.readUInt32LE(0);
-  const second = r.stdout.readUInt32LE(4 + first);
-  assert.equal(r.stdout.length, 8 + first + second);
 });

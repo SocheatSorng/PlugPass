@@ -12,7 +12,7 @@ namespace PlugPass
     {
         internal const int MaxRequestBytes = 64 * 1024;
 
-        internal static int Run(IConsent consent)
+        internal static int Run(IPinPrompt prompt, string[] args)
         {
             Stream input = Console.OpenStandardInput();
             Stream output = Console.OpenStandardOutput();
@@ -34,11 +34,11 @@ namespace PlugPass
                 {
                     return 1;
                 }
-                Send(output, HandleOne(body, consent));
+                Send(output, HandleOne(body, prompt, args));
             }
         }
 
-        private static Dictionary<string, object> HandleOne(byte[] body, IConsent consent)
+        private static Dictionary<string, object> HandleOne(byte[] body, IPinPrompt prompt, string[] args)
         {
             Dictionary<string, object> req;
             try
@@ -55,7 +55,7 @@ namespace PlugPass
             }
             try
             {
-                return Authenticator.Handle(req, consent, SpikeMaster.Load);
+                return Authenticator.Handle(req, prompt, delegate { return Drives.FindKeyRoot(args); });
             }
             catch (Exception ex)
             {

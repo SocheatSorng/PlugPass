@@ -10,33 +10,56 @@ namespace PlugPass
         Cancel,
     }
 
-    // Asks the person to confirm (user presence). Fallback = "use another security key" (the browser's own).
-    internal interface IConsent
+    internal sealed class PinQuestion
     {
-        Decision Ask(bool isCreate, string rpId);
+        internal bool IsCreate;
+        internal string RpId;
+        internal int TriesLeft;
+        internal string Error;
     }
 
-    // Software security key: answers WebAuthn create/get requests (from the extension) the way a
-    // CTAP2 authenticator would, with "none" attestation and non-discoverable credentials.
+    internal sealed class PinAnswer
+    {
+        internal Decision Decision;
+        internal string Pin;
+    }
+
+    // The person's side: PIN entry (user presence + verification), account choice, short notices.
+    // Fallback = "use another security key" (the browser's own).
+    internal interface IPinPrompt
+    {
+        PinAnswer AskPin(PinQuestion q);
+
+        // Index of the chosen account, or -1 to cancel.
+        int ChooseAccount(string rpId, string[] accounts);
+
+        void Tell(string message);
+    }
+
+    // Security key backed by the PlugPass USB drive: answers WebAuthn create/get requests (from the
+    // extension) like a CTAP2 authenticator with a PIN: "none" attestation, user verification by PIN,
+    // a signature counter, and passkeys (discoverable credentials) stored on the drive.
     //
     // Request:  { type: "create" | "get", origin: "https://...", options: <publicKey options, binary as base64url> }
     // Reply:    { status: "ok", credential: { id, rawId, type, authenticatorAttachment, response, clientExtensionResults } }
     //        or { status: "error", name: <DOMException name>, message, fallback: <true = let the browser handle it> }
     //
     // The origin comes from the browser (sender.origin in the extension), never from the page.
+    // No drive, a damaged drive, or a drive from another PC: silent fallback, so the password and the
+    // browser's own security keys always keep working.
     internal static class Authenticator
     {
-        // Phase 1 is scoped to Google (and webauthn.io for testing).
         internal static readonly string[] AllowedRpIds = { "google.com", "webauthn.io" };
 
         private const byte FlagUserPresent = 0x01;
+        private const byte FlagUserVerified = 0x04;
         private const byte FlagAttestedData = 0x40;
         private const int MinChallenge = 16;
+        private const int MaxNameLength = 64;
         private static readonly byte[] Aaguid = new byte[16];
-        private static readonly byte[] ZeroCounter = new byte[4]; // 0 = no counter (allowed by WebAuthn)
 
         internal static Dictionary<string, object> Handle(
-            Dictionary<string, object> req, IConsent consent, Func<bool, byte[]> loadMaster)
+            Dictionary<string, object> req, IPinPrompt prompt, Func<string> findDrive)
         {
             string type = Json.Str(req, "type");
             Dictionary<string, object> opt = Json.Map(req, "options");
@@ -50,11 +73,11 @@ namespace PlugPass
             {
                 return Error("SecurityError", "Only secure (https) pages can use PlugPass.", false);
             }
-            return type == "create" ? Create(opt, origin, host, consent, loadMaster) : Get(opt, origin, host, consent, loadMaster);
+            return type == "create" ? Create(opt, origin, host, prompt, findDrive) : Get(opt, origin, host, prompt, findDrive);
         }
 
         private static Dictionary<string, object> Create(
-            Dictionary<string, object> opt, string origin, string host, IConsent consent, Func<bool, byte[]> loadMaster)
+            Dictionary<string, object> opt, string origin, string host, IPinPrompt prompt, Func<string> findDrive)
         {
             Dictionary<string, object> rp = Json.Map(opt, "rp");
             string rpId = rp == null ? null : Json.Str(rp, "id");
@@ -67,12 +90,13 @@ namespace PlugPass
             {
                 return Error("NotSupportedError", "The site doesn't accept PlugPass's key type.", true);
             }
-            Dictionary<string, object> sel = Json.Map(opt, "authenticatorSelection");
-            if (sel != null && (Json.Str(sel, "residentKey") == "required" || Json.Bool(sel, "requireResidentKey")
-                || Json.Str(sel, "userVerification") == "required" || Json.Str(sel, "authenticatorAttachment") == "platform"))
+            Dictionary<string, object> sel = Json.Map(opt, "authenticatorSelection") ?? new Dictionary<string, object>();
+            if (Json.Str(sel, "authenticatorAttachment") == "platform")
             {
-                return Error("NotSupportedError", "The site wants a passkey PlugPass can't make yet.", true);
+                return Error("NotSupportedError", "The site wants this device's own authenticator.", true);
             }
+            string residentKey = Json.Str(sel, "residentKey");
+            bool resident = residentKey == "required" || residentKey == "preferred" || Json.Bool(sel, "requireResidentKey");
             byte[] challenge = Bytes.FromB64Url(Json.Str(opt, "challenge"));
             Dictionary<string, object> user = Json.Map(opt, "user");
             byte[] userHandle = user == null ? null : Bytes.FromB64Url(Json.Str(user, "id"));
@@ -82,29 +106,49 @@ namespace PlugPass
                 return Error("TypeError", "The site sent an invalid request.", false);
             }
 
+            Dictionary<string, object> error;
+            KeyFile kf = FindKey(findDrive, out error);
+            if (kf == null)
+            {
+                return error;
+            }
             byte[] rpIdHash = Bytes.Sha256(Bytes.Utf8(rpId));
-            byte[] master = loadMaster(false);
-            if (master != null && FindOurs(master, rpIdHash, Json.Arr(opt, "excludeCredentials")) != null)
+            List<byte[]> excluded = OwnIds(Json.Arr(opt, "excludeCredentials"), kf.KeyId);
+            if (!UnlockWithPin(kf, true, rpId, prompt, out error))
             {
-                // Ask first (like touching a hardware key), so a site can't silently probe for the key.
-                consent.Ask(true, rpId);
-                return Error("InvalidStateError", "This PlugPass key is already registered with this account.", false);
+                return error;
             }
-            Decision d = consent.Ask(true, rpId);
-            if (d != Decision.Allow)
+            KeyPayload p = kf.Payload;
+            foreach (byte[] id in excluded)
             {
-                return DecisionError(d);
-            }
-            if (master == null)
-            {
-                master = loadMaster(true);
+                CredentialWrap.Contents c = CredentialWrap.Unwrap(p.Master, id);
+                if (c != null && Bytes.FixedTimeEquals(c.RpIdHash, rpIdHash))
+                {
+                    return Error("InvalidStateError", "This PlugPass key is already registered with this account.", false);
+                }
             }
 
             byte[] blob = EcKey.Generate();
-            byte[] credId = CredentialWrap.Wrap(master, rpIdHash, blob, userHandle);
+            byte[] credId = CredentialWrap.Wrap(p.Master, kf.KeyId, rpIdHash, blob, userHandle);
+            p.Counter++;
+            if (resident)
+            {
+                string handle = Bytes.ToB64Url(userHandle);
+                p.Passkeys.RemoveAll(k => k.RpId == rpId && k.UserHandle == handle);
+                Passkey pk = new Passkey();
+                pk.RpId = rpId;
+                pk.CredId = Bytes.ToB64Url(credId);
+                pk.UserHandle = handle;
+                pk.UserName = Clip(Json.Str(user, "name"));
+                pk.DisplayName = Clip(Json.Str(user, "displayName"));
+                pk.Created = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                p.Passkeys.Add(pk);
+            }
+            kf.Save();
+
             byte[] clientData = ClientData("webauthn.create", challenge, origin);
             byte[] authData = Bytes.Concat(
-                rpIdHash, new byte[] { FlagUserPresent | FlagAttestedData }, ZeroCounter, Aaguid,
+                rpIdHash, new byte[] { FlagUserPresent | FlagUserVerified | FlagAttestedData }, Counter(p.Counter), Aaguid,
                 new byte[] { (byte)(credId.Length >> 8), (byte)credId.Length }, credId, EcKey.CoseKey(blob));
             // {"fmt": "none", "attStmt": {}, "authData": ...} in canonical key order.
             byte[] attObj = new CborWriter().Map(3)
@@ -121,11 +165,20 @@ namespace PlugPass
             response["publicKeyAlgorithm"] = EcKey.CoseAlgEs256;
             response["transports"] = new[] { "usb" };
             Array.Clear(blob, 0, blob.Length);
-            return Ok(credId, response);
+
+            Dictionary<string, object> ext = new Dictionary<string, object>();
+            Dictionary<string, object> requested = Json.Map(opt, "extensions");
+            if (requested != null && Json.Bool(requested, "credProps"))
+            {
+                Dictionary<string, object> props = new Dictionary<string, object>();
+                props["rk"] = resident;
+                ext["credProps"] = props;
+            }
+            return Ok(credId, response, ext);
         }
 
         private static Dictionary<string, object> Get(
-            Dictionary<string, object> opt, string origin, string host, IConsent consent, Func<bool, byte[]> loadMaster)
+            Dictionary<string, object> opt, string origin, string host, IPinPrompt prompt, Func<string> findDrive)
         {
             string rpId = Json.Str(opt, "rpId");
             Dictionary<string, object> check = CheckRp(host, ref rpId);
@@ -133,40 +186,75 @@ namespace PlugPass
             {
                 return check;
             }
-            if (Json.Str(opt, "userVerification") == "required")
-            {
-                return Error("NotSupportedError", "The site wants a PIN-verified key; PlugPass adds that in phase 2.", true);
-            }
-            object[] allow = Json.Arr(opt, "allowCredentials");
-            if (allow == null || allow.Length == 0)
-            {
-                return Error("NotSupportedError", "The site wants a passkey PlugPass can't use yet.", true);
-            }
-            byte[] master = loadMaster(false);
-            if (master == null)
-            {
-                return Error("NotAllowedError", "No PlugPass key is set up.", true);
-            }
-            byte[] rpIdHash = Bytes.Sha256(Bytes.Utf8(rpId));
-            byte[] credId;
-            CredentialWrap.Contents found = FindOurs(master, rpIdHash, allow, out credId);
-            if (found == null)
-            {
-                return Error("NotAllowedError", "This account doesn't use this PlugPass key.", true);
-            }
             byte[] challenge = Bytes.FromB64Url(Json.Str(opt, "challenge"));
             if (challenge == null || challenge.Length < MinChallenge)
             {
                 return Error("TypeError", "The site sent an invalid request.", false);
             }
-            Decision d = consent.Ask(false, rpId);
-            if (d != Decision.Allow)
+            Dictionary<string, object> error;
+            KeyFile kf = FindKey(findDrive, out error);
+            if (kf == null)
             {
-                return DecisionError(d);
+                return error;
+            }
+            object[] allow = Json.Arr(opt, "allowCredentials");
+            bool discoverable = allow == null || allow.Length == 0;
+            List<byte[]> mine = OwnIds(allow, kf.KeyId);
+            if (!discoverable && mine.Count == 0)
+            {
+                return Error("NotAllowedError", "This account doesn't use this PlugPass key.", true);
+            }
+            if (!UnlockWithPin(kf, false, rpId, prompt, out error))
+            {
+                return error;
+            }
+            KeyPayload p = kf.Payload;
+            byte[] rpIdHash = Bytes.Sha256(Bytes.Utf8(rpId));
+
+            byte[] credId = null;
+            CredentialWrap.Contents found = null;
+            if (discoverable)
+            {
+                List<Passkey> candidates = p.Passkeys.FindAll(k => k.RpId == rpId);
+                if (candidates.Count == 0)
+                {
+                    return Error("NotAllowedError", "There's no passkey for " + rpId + " on this PlugPass drive.", true);
+                }
+                int pick = 0;
+                if (candidates.Count > 1)
+                {
+                    string[] labels = candidates.ConvertAll(k => Label(k)).ToArray();
+                    pick = prompt.ChooseAccount(rpId, labels);
+                    if (pick < 0 || pick >= candidates.Count)
+                    {
+                        return Error("NotAllowedError", "Cancelled.", false);
+                    }
+                }
+                credId = Bytes.FromB64Url(candidates[pick].CredId);
+                found = CredentialWrap.Unwrap(p.Master, credId);
+            }
+            else
+            {
+                foreach (byte[] id in mine)
+                {
+                    CredentialWrap.Contents c = CredentialWrap.Unwrap(p.Master, id);
+                    if (c != null && Bytes.FixedTimeEquals(c.RpIdHash, rpIdHash))
+                    {
+                        credId = id;
+                        found = c;
+                        break;
+                    }
+                }
+            }
+            if (found == null || !Bytes.FixedTimeEquals(found.RpIdHash, rpIdHash))
+            {
+                return Error("NotAllowedError", "This account doesn't use this PlugPass key.", true);
             }
 
+            p.Counter++;
+            kf.Save(); // before signing, so a counter value is never used twice
             byte[] clientData = ClientData("webauthn.get", challenge, origin);
-            byte[] authData = Bytes.Concat(rpIdHash, new byte[] { FlagUserPresent }, ZeroCounter);
+            byte[] authData = Bytes.Concat(rpIdHash, new byte[] { FlagUserPresent | FlagUserVerified }, Counter(p.Counter));
             byte[] signature = EcKey.Sign(found.KeyBlob, Bytes.Concat(authData, Bytes.Sha256(clientData)));
             Array.Clear(found.KeyBlob, 0, found.KeyBlob.Length);
 
@@ -175,7 +263,71 @@ namespace PlugPass
             response["authenticatorData"] = Bytes.ToB64Url(authData);
             response["signature"] = Bytes.ToB64Url(signature);
             response["userHandle"] = found.UserHandle.Length == 0 ? null : Bytes.ToB64Url(found.UserHandle);
-            return Ok(credId, response);
+            return Ok(credId, response, new Dictionary<string, object>());
+        }
+
+        // The plugged-in drive's key, ready for this PC; otherwise a silent "let the browser handle it".
+        private static KeyFile FindKey(Func<string> findDrive, out Dictionary<string, object> error)
+        {
+            error = null;
+            string root = findDrive();
+            if (root == null)
+            {
+                error = Error("NotAllowedError", "No PlugPass drive is plugged in.", true);
+                return null;
+            }
+            KeyFile kf = KeyFile.Open(root);
+            if (kf == null)
+            {
+                error = Error("NotAllowedError", "The PlugPass key on this drive can't be read.", true);
+                return null;
+            }
+            if (PcSecrets.Load(kf.KeyId) == null)
+            {
+                error = Error("NotAllowedError", "This PlugPass drive was set up on another PC.", true);
+                return null;
+            }
+            return kf;
+        }
+
+        // Asks for the PIN until it's right, the person gives up, or the key is erased.
+        private static bool UnlockWithPin(KeyFile kf, bool isCreate, string rpId, IPinPrompt prompt, out Dictionary<string, object> error)
+        {
+            string problem = null;
+            while (true)
+            {
+                PinQuestion q = new PinQuestion();
+                q.IsCreate = isCreate;
+                q.RpId = rpId;
+                q.TriesLeft = kf.TriesLeft;
+                q.Error = problem;
+                PinAnswer a = prompt.AskPin(q);
+                if (a == null || a.Decision != Decision.Allow)
+                {
+                    error = DecisionError(a == null ? Decision.Cancel : a.Decision);
+                    return false;
+                }
+                switch (kf.Unlock(a.Pin))
+                {
+                    case UnlockResult.Ok:
+                        error = null;
+                        return true;
+                    case UnlockResult.WrongPin:
+                        problem = "Wrong PIN. " + kf.TriesLeft + (kf.TriesLeft == 1 ? " try" : " tries") + " left before the key is erased.";
+                        continue;
+                    case UnlockResult.Wiped:
+                        prompt.Tell("Too many wrong PINs: the PlugPass key on this drive was erased. "
+                            + "Sign in with your password and set up the drive again.");
+                        error = Error("NotAllowedError", "The PlugPass key was erased after too many wrong PINs.", true);
+                        return false;
+                    case UnlockResult.OtherPc:
+                        error = Error("NotAllowedError", "This PlugPass drive was set up on another PC.", true);
+                        return false;
+                    default:
+                        error = Error("NotAllowedError", "The PlugPass key on this drive is damaged.", true);
+                        return false;
+                }
+            }
         }
 
         // "https://host[:port]" with nothing else, or null.
@@ -230,31 +382,47 @@ namespace PlugPass
             return false;
         }
 
-        private static CredentialWrap.Contents FindOurs(byte[] master, byte[] rpIdHash, object[] list)
+        // Credential IDs in a descriptor list that were made by this drive (checked without the PIN).
+        private static List<byte[]> OwnIds(object[] list, byte[] keyId)
         {
-            byte[] ignored;
-            return FindOurs(master, rpIdHash, list, out ignored);
-        }
-
-        private static CredentialWrap.Contents FindOurs(byte[] master, byte[] rpIdHash, object[] list, out byte[] credId)
-        {
-            credId = null;
+            List<byte[]> ids = new List<byte[]>();
             if (list == null)
             {
-                return null;
+                return ids;
             }
             foreach (object o in list)
             {
                 Dictionary<string, object> desc = o as Dictionary<string, object>;
                 byte[] id = desc == null ? null : Bytes.FromB64Url(Json.Str(desc, "id"));
-                CredentialWrap.Contents c = CredentialWrap.Unwrap(master, id);
-                if (c != null && Bytes.FixedTimeEquals(c.RpIdHash, rpIdHash))
+                if (Bytes.FixedTimeEquals(CredentialWrap.KeyIdOf(id), keyId))
                 {
-                    credId = id;
-                    return c;
+                    ids.Add(id);
                 }
             }
-            return null;
+            return ids;
+        }
+
+        private static string Label(Passkey k)
+        {
+            if (k.DisplayName.Length > 0 && k.UserName.Length > 0 && k.DisplayName != k.UserName)
+            {
+                return k.DisplayName + " (" + k.UserName + ")";
+            }
+            return k.UserName.Length > 0 ? k.UserName : (k.DisplayName.Length > 0 ? k.DisplayName : "Account");
+        }
+
+        private static string Clip(string s)
+        {
+            if (s == null)
+            {
+                return "";
+            }
+            return s.Length > MaxNameLength ? s.Substring(0, MaxNameLength) : s;
+        }
+
+        private static byte[] Counter(uint value)
+        {
+            return new byte[] { (byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte)value };
         }
 
         private static byte[] ClientData(string type, byte[] challenge, string origin)
@@ -263,7 +431,7 @@ namespace PlugPass
                 + "\",\"origin\":\"" + Json.Escape(origin) + "\",\"crossOrigin\":false}");
         }
 
-        private static Dictionary<string, object> Ok(byte[] credId, Dictionary<string, object> response)
+        private static Dictionary<string, object> Ok(byte[] credId, Dictionary<string, object> response, Dictionary<string, object> ext)
         {
             Dictionary<string, object> cred = new Dictionary<string, object>();
             cred["id"] = Bytes.ToB64Url(credId);
@@ -271,7 +439,7 @@ namespace PlugPass
             cred["type"] = "public-key";
             cred["authenticatorAttachment"] = "cross-platform";
             cred["response"] = response;
-            cred["clientExtensionResults"] = new Dictionary<string, object>();
+            cred["clientExtensionResults"] = ext;
             Dictionary<string, object> r = new Dictionary<string, object>();
             r["status"] = "ok";
             r["credential"] = cred;

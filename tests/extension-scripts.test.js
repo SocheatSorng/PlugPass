@@ -160,30 +160,30 @@ test("inject: sign-in replies become assertion responses", async () => {
   assert.equal(cred.response.signature.byteLength, 1);
 });
 
-test("inject: requests PlugPass can't serve go straight to the browser", async () => {
+test("inject: passkey and PIN requests go to PlugPass; autofill and platform-only don't", async () => {
   const page = loadInject(() => okCreate);
-  const cases = [
-    ["create", createOptions({ residentKey: "required" })],
-    ["create", createOptions({ requireResidentKey: true })],
-    ["create", createOptions({ userVerification: "required" })],
+  for (const options of [
+    createOptions({ residentKey: "required", userVerification: "required" }),
+    getOptions({ allowCredentials: [], userVerification: "required" }),
+  ]) {
+    await (options.publicKey.rp ? page.credentials.create(options) : page.credentials.get(options));
+  }
+  assert.equal(page.posted.length, 2);
+  const skipped = [
     ["create", createOptions({ authenticatorAttachment: "platform" })],
-    ["get", getOptions({ userVerification: "required" })],
-    ["get", getOptions({ allowCredentials: [] })],
     ["get", { ...getOptions(), mediation: "conditional" }],
     ["get", { password: true }],
   ];
-  for (const [kind, options] of cases) {
+  for (const [kind, options] of skipped) {
     const r = await (kind === "create"
       ? page.credentials.create(options)
       : page.credentials.get(options));
     assert.equal(r, `browser-${kind}`, JSON.stringify(options));
   }
-  assert.equal(page.posted.length, 0);
-  // Every WebAuthn case says why in the console (the password request isn't WebAuthn: silent).
-  assert.equal(page.logs.length, cases.length - 1);
-  assert.match(page.logs[0], /^PlugPass: create handed to the browser: .*residentKey: required/);
-  assert.match(page.logs[2], /userVerification: required/);
-  assert.match(page.logs[6], /conditional mediation/);
+  assert.equal(page.posted.length, 2);
+  assert.equal(page.logs.length, 2, "the password request is not WebAuthn: silent");
+  assert.match(page.logs[0], /own authenticator/);
+  assert.match(page.logs[1], /conditional mediation/);
 });
 
 test("inject: a fallback reply hands the same request to the browser", async () => {
