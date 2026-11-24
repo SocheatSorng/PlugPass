@@ -2,12 +2,43 @@
 
 Turn a normal USB flash drive into a security key:
 
-- **Google sign-in** (Chrome and Edge): plug in the drive, type your PIN, done.
-- **Windows sign-in** (local account): plug in the drive and Windows signs you in.
+- **Google sign-in** (Brave, Chrome and Edge): plug in the drive, type your PIN, done.
+- **Windows sign-in** (local account, planned): plug in the drive and Windows signs you in.
 
-Your normal password keeps working for both, with or without the drive.
+Your normal password keeps working, with or without the drive.
 
-> Status: early development. Nothing is usable yet. See [docs/spec.md](docs/spec.md) for the plan.
+> Status: Google sign-in works (drive + PIN, as a passkey or as a second step). Windows sign-in is
+> planned. See [docs/spec.md](docs/spec.md).
+
+## Install (users)
+
+1. Unzip `PlugPass-<version>.zip` anywhere and double-click `PlugPass.exe`.
+2. Click **Install**. PlugPass installs for your Windows account only (no administrator rights) into
+   `%LOCALAPPDATA%\Programs\PlugPass` and registers itself with Brave, Chrome and Edge.
+3. Add the extension (browsers only let the Web Store install extensions automatically):
+   open `brave://extensions` (or `chrome://extensions`, `edge://extensions`), turn on
+   **Developer mode**, click **Load unpacked** and choose `%LOCALAPPDATA%\Programs\PlugPass\extension`.
+   The installer opens that folder for you.
+
+## Use
+
+1. **Set up a drive:** Start menu > **PlugPass**. Pick your USB flash drive, choose a PIN (6+
+   characters; letters make it much stronger) and click **Set up drive**. Only a `PlugPass` folder
+   is added; your other files stay as they are.
+2. **Add it to Google:** Google Account > Security > **Passkeys and security keys** > **Create a
+   passkey** > **Use another device**. Type your PIN in the PlugPass window and click **Add**.
+   Google holds new keys for a few days unless you approve them with a passkey you already have.
+3. **Sign in:** plug in the drive; when Google asks for your passkey or security key, PlugPass asks
+   for your PIN.
+
+Good to know:
+
+- The drive works for Google only on the PC where you set it up (a copied drive is useless elsewhere).
+- 8 wrong PINs in a row erase the key on the drive. Your password still works; set the drive up again
+  and add it to Google again.
+- Without the drive, PlugPass stays out of the way and your browser behaves as usual.
+- **Uninstall:** Settings > Apps > PlugPass. Your drive keeps working after a reinstall. Remove the
+  extension from your browser too.
 
 ## How it works (short)
 
@@ -30,7 +61,7 @@ Google needs the PIN, and the Windows sign-in only works on your own PC.
 ```powershell
 npm ci           # once: lint tools (ESLint, Prettier)
 .\lint.ps1       # C# warnings as errors, ESLint + security rules, Prettier, text checks
-.\build.ps1      # bin\PlugPass.exe, bin\test\PlugPass.exe, bin\extension\
+.\build.ps1      # bin\PlugPass.exe, bin\test\PlugPass.exe, bin\extension\, dist\PlugPass-<version>.zip
 .\test.ps1       # JavaScript + PowerShell tests (fake drives only)
 ```
 

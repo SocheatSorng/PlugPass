@@ -18,7 +18,7 @@ namespace PlugPass
     // 8 locked (the drive says it already used up its tries; nothing is erased on its word).
     internal static class Program
     {
-        internal const string Version = "0.2.0";
+        internal const string Version = "0.3.0";
         internal const string ExtensionOrigin = "chrome-extension://amppkfbnjicgeeakigkmafdllhknaigl/";
 
         // Runs a key command while holding the key-file lock; a drive that can't be written is an error.
@@ -78,13 +78,23 @@ namespace PlugPass
             {
                 return KeyInfo(args[1]);
             }
+            bool quiet = Array.IndexOf(args, "--quiet") >= 0;
+            if (args.Length >= 1 && args.Length <= 2 && args[0] == "install" && (args.Length == 1 || quiet))
+            {
+                return InstallCommand(quiet);
+            }
+            if (args.Length >= 1 && args.Length <= 2 && args[0] == "uninstall" && (args.Length == 1 || quiet))
+            {
+                return UninstallCommand(quiet);
+            }
 #if TESTHOOKS
             if (args.Length == 2 && args[0] == "unlock-check")
             {
                 return Locked(delegate { return UnlockCheck(args[1]); });
             }
 #endif
-            Console.Error.WriteLine("Usage: PlugPass [setup] | version | create-key <drive> | change-pin <drive> | key-info <drive>");
+            Console.Error.WriteLine("Usage: PlugPass [setup] | version | install [--quiet] | uninstall [--quiet] | "
+                + "create-key <drive> | change-pin <drive> | key-info <drive>");
             return 2;
         }
 
@@ -140,6 +150,69 @@ namespace PlugPass
             }
             kf.ChangePin(pin);
             Console.WriteLine("PIN changed.");
+            return 0;
+        }
+
+        private static int InstallCommand(bool quiet)
+        {
+            try
+            {
+                Installer.Install();
+            }
+            catch (IOException ex)
+            {
+                return Fail(6, "Install failed: " + ex.Message);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Fail(6, "Install failed: " + ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Fail(6, "Install failed: " + ex.Message);
+            }
+            Console.WriteLine("Installed " + Installer.InstalledExe);
+            Console.WriteLine("Extension folder: " + Installer.ExtensionDir);
+            if (!quiet)
+            {
+                System.Windows.Forms.MessageBox.Show(SetupForm.ExtensionSteps(), "PlugPass installed");
+            }
+            return 0;
+        }
+
+        // Settings > Apps runs this. Drive keys and this PC's halves of them are kept, so a reinstall
+        // keeps every drive working.
+        private static int UninstallCommand(bool quiet)
+        {
+            if (!quiet && System.Windows.Forms.MessageBox.Show(
+                    "Remove PlugPass from this PC?\n\nYour USB drive and its keys are kept, so after a reinstall it works again. "
+                    + "Also remove the PlugPass extension from your browser.",
+                    "PlugPass", System.Windows.Forms.MessageBoxButtons.OKCancel) != System.Windows.Forms.DialogResult.OK)
+            {
+                return 0;
+            }
+            bool pending;
+            try
+            {
+                pending = Installer.Uninstall();
+            }
+            catch (IOException ex)
+            {
+                return Fail(6, "Uninstall failed: " + ex.Message);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Fail(6, "Uninstall failed: " + ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Fail(6, "Uninstall failed: " + ex.Message);
+            }
+            Console.WriteLine(pending ? "Uninstalled; PlugPass.exe is removed in a few seconds." : "Uninstalled.");
+            if (!quiet)
+            {
+                System.Windows.Forms.MessageBox.Show("PlugPass was removed. Remove the PlugPass extension from your browser too.", "PlugPass");
+            }
             return 0;
         }
 

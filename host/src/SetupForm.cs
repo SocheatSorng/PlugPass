@@ -39,6 +39,29 @@ namespace PlugPass
             layout.Controls.Add(title);
             layout.SetColumnSpan(title, 2);
 
+            if (!Installer.RunningInstalledCopy)
+            {
+                // Run from a download folder: offer to install first, so the browser can find PlugPass.
+                FlowLayoutPanel installRow = new FlowLayoutPanel();
+                installRow.AutoSize = true;
+                installRow.WrapContents = false;
+                installRow.Margin = new Padding(0, 0, 0, 16);
+                Label installText = NewLabel(Installer.IsInstalled
+                    ? "Update PlugPass on this PC to this version?"
+                    : "PlugPass isn't installed on this PC yet.");
+                installText.Anchor = AnchorStyles.Left;
+                Button install = new Button();
+                install.Text = Installer.IsInstalled ? "Update" : "Install";
+                install.AutoSize = true;
+                install.MinimumSize = new Size(88, 28);
+                install.Anchor = AnchorStyles.Left;
+                install.Click += delegate { InstallNow(); };
+                installRow.Controls.Add(installText);
+                installRow.Controls.Add(install);
+                layout.Controls.Add(installRow);
+                layout.SetColumnSpan(installRow, 2);
+            }
+
             layout.Controls.Add(NewLabel("USB drive:"));
             FlowLayoutPanel driveRow = new FlowLayoutPanel();
             driveRow.AutoSize = true;
@@ -112,6 +135,43 @@ namespace PlugPass
             AcceptButton = _create;
             CancelButton = close;
             LoadDrives();
+        }
+
+        private void InstallNow()
+        {
+            try
+            {
+                Cursor = Cursors.WaitCursor;
+                Installer.Install();
+            }
+            catch (Exception ex)
+            {
+                if (!(ex is IOException || ex is UnauthorizedAccessException || ex is InvalidOperationException))
+                {
+                    throw;
+                }
+                MessageBox.Show(this, "PlugPass couldn't be installed: " + ex.Message, "PlugPass",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            finally
+            {
+                Cursor = Cursors.Default;
+            }
+            MessageBox.Show(this, ExtensionSteps(), "PlugPass installed", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            System.Diagnostics.Process.Start("explorer.exe", "\"" + Installer.ExtensionDir + "\"");
+            System.Diagnostics.Process.Start(Installer.InstalledExe, "setup");
+            Close();
+        }
+
+        // Browsers only let the Web Store install extensions, so this one step is by hand.
+        internal static string ExtensionSteps()
+        {
+            return "PlugPass is installed. One last step: add the extension to your browser.\n\n"
+                + "1. Open brave://extensions (Chrome: chrome://extensions, Edge: edge://extensions).\n"
+                + "2. Turn on Developer mode.\n"
+                + "3. Click Load unpacked and choose this folder (it opens next):\n   " + Installer.ExtensionDir + "\n\n"
+                + "If you loaded PlugPass from another folder before, remove that copy first.";
         }
 
         private void LoadDrives()
