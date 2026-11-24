@@ -446,6 +446,16 @@ test("change-pin: the old PIN stops working, keys keep working with the new one"
   checkAssertion(send(req, { root, pins: ["new-pin-123"] }).reply, req, publicKey);
 });
 
+test("non-ASCII PINs on stdin are read as UTF-8 (same PIN as typed in the PIN window)", () => {
+  const root = newDrive("drive-utf8", "pässwörd-ü1");
+  const { cred, publicKey } = parseCreate(
+    send(createRequest(), { root, pins: ["pässwörd-ü1"] }).reply,
+  );
+  const req = getRequest([cred.id]);
+  checkAssertion(send(req, { root, pins: ["pässwörd-ü1"] }).reply, req, publicKey);
+  assert.equal(cli(["unlock-check", root], ["pässwörd-ü1"]).code, 0);
+});
+
 test("create-key refuses weak PINs, mismatches and overwriting", () => {
   const root = join(out, "drive-rules");
   mkdirSync(root, { recursive: true });

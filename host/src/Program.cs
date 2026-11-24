@@ -78,6 +78,14 @@ namespace PlugPass
             {
                 return KeyInfo(args[1]);
             }
+            if (args.Length == 2 && args[0] == "enrol-windows")
+            {
+                return EnrolWindows(args[1]);
+            }
+            if (args.Length == 2 && args[0] == "remove-windows")
+            {
+                return RemoveWindows(args[1]);
+            }
             bool quiet = Array.IndexOf(args, "--quiet") >= 0;
             if (args.Length >= 1 && args.Length <= 2 && args[0] == "install" && (args.Length == 1 || quiet))
             {
@@ -88,6 +96,17 @@ namespace PlugPass
                 return UninstallCommand(quiet);
             }
 #if TESTHOOKS
+            if (args.Length == 2 && args[0] == "windows-check")
+            {
+                string password;
+                string user = WindowsKey.CheckUser(args[1], out password);
+                if (user == null)
+                {
+                    return Fail(6, "No matching Windows sign-in for this drive.");
+                }
+                Console.WriteLine("user " + user + " password-length " + password.Length);
+                return 0;
+            }
             if (args.Length == 2 && args[0] == "unlock-check")
             {
                 return Locked(delegate { return UnlockCheck(args[1]); });
@@ -98,14 +117,19 @@ namespace PlugPass
             return 2;
         }
 
+        // PINs and passwords on stdin are UTF-8 (Console.In uses the old OEM code page, which would
+        // turn "ä" into two characters, so the same PIN typed in a window wouldn't match).
+        private static readonly TextReader StdIn =
+            new StreamReader(Console.OpenStandardInput(), new System.Text.UTF8Encoding(false));
+
         private static int CreateKey(string root)
         {
             if (!Drives.IsAllowedTarget(root))
             {
                 return Fail(7, "Not a removable drive: " + root);
             }
-            string pin = Console.In.ReadLine();
-            string again = Console.In.ReadLine();
+            string pin = StdIn.ReadLine();
+            string again = StdIn.ReadLine();
             string problem = KeyFile.CheckPin(pin);
             if (problem != null)
             {
@@ -131,9 +155,9 @@ namespace PlugPass
             {
                 return Fail(6, "No readable PlugPass key on " + root);
             }
-            string current = Console.In.ReadLine();
-            string pin = Console.In.ReadLine();
-            string again = Console.In.ReadLine();
+            string current = StdIn.ReadLine();
+            string pin = StdIn.ReadLine();
+            string again = StdIn.ReadLine();
             string problem = KeyFile.CheckPin(pin);
             if (problem != null)
             {
@@ -150,6 +174,70 @@ namespace PlugPass
             }
             kf.ChangePin(pin);
             Console.WriteLine("PIN changed.");
+            return 0;
+        }
+
+        // Lets the drive sign the current Windows user in. stdin: the Windows password (checked with
+        // Windows first). Needs admin rights: the PC half goes into a folder only SYSTEM/Admins can read.
+        private static int EnrolWindows(string root)
+        {
+            if (!Drives.IsAllowedTarget(root))
+            {
+                return Fail(7, "Not a removable drive: " + root);
+            }
+            bool testHome = false;
+#if TESTHOOKS
+            testHome = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PLUGPASS_HOME"));
+#endif
+            if (!testHome && !WindowsKey.IsElevated())
+            {
+                return Fail(9, "Needs administrator rights.");
+            }
+            string user = Environment.UserName;
+            string password = StdIn.ReadLine() ?? "";
+            if (!testHome && !WindowsKey.PasswordIsCorrect(user, password))
+            {
+                return Fail(3, "That isn't the Windows password for " + user + ".");
+            }
+            try
+            {
+                WindowsKey.Enrol(root, user, password);
+            }
+            catch (IOException ex)
+            {
+                return Fail(6, "Couldn't save: " + ex.Message);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Fail(6, "Couldn't save: " + ex.Message);
+            }
+            Console.WriteLine("Drive " + root + " can now sign in " + user + ".");
+            return 0;
+        }
+
+        private static int RemoveWindows(string root)
+        {
+            bool testHome = false;
+#if TESTHOOKS
+            testHome = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PLUGPASS_HOME"));
+#endif
+            if (!testHome && !WindowsKey.IsElevated())
+            {
+                return Fail(9, "Needs administrator rights.");
+            }
+            try
+            {
+                WindowsKey.Remove(root);
+            }
+            catch (IOException ex)
+            {
+                return Fail(6, "Couldn't remove: " + ex.Message);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                return Fail(6, "Couldn't remove: " + ex.Message);
+            }
+            Console.WriteLine("Windows sign-in removed from " + root + ".");
             return 0;
         }
 
@@ -236,7 +324,7 @@ namespace PlugPass
             {
                 return Fail(6, "No readable PlugPass key on " + root);
             }
-            int code = UnlockCode(kf.Unlock(Console.In.ReadLine()), kf);
+            int code = UnlockCode(kf.Unlock(StdIn.ReadLine()), kf);
             if (code == 0)
             {
                 Console.WriteLine("ok passkeys " + kf.Payload.Passkeys.Count + " counter " + kf.Payload.Counter);
