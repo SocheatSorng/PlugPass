@@ -416,6 +416,38 @@ namespace PlugPass
             get { return File.Exists(Dll); }
         }
 
+        internal static string AdminExe
+        {
+            get { return Path.Combine(Dir, "PlugPass.exe"); }
+        }
+
+        // The admin-owned copy, when it is the same build as the running app (so it is safe to elevate
+        // instead of the per-user copy). Null when there is none or it is a different version.
+        internal static string MatchingAdminExe()
+        {
+            try
+            {
+                if (!File.Exists(AdminExe))
+                {
+                    return null;
+                }
+                using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+                {
+                    byte[] a = sha.ComputeHash(File.ReadAllBytes(AdminExe));
+                    byte[] b = sha.ComputeHash(File.ReadAllBytes(Installer.CurrentExe));
+                    return Bytes.FixedTimeEquals(a, b) ? AdminExe : null;
+                }
+            }
+            catch (IOException)
+            {
+                return null;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return null;
+            }
+        }
+
         // Copies the tile next to the running exe into Program Files and registers it.
         internal static void Install()
         {
@@ -452,6 +484,23 @@ namespace PlugPass
                 }
                 File.Copy(source, Dll);
             }
+            // An admin-owned copy of the app: the setup window elevates this one from now on, never the
+            // per-user copy that a program running as the user could have replaced.
+            if (!Installer.SamePath(Installer.CurrentExe, AdminExe))
+            {
+                if (File.Exists(AdminExe))
+                {
+                    try
+                    {
+                        File.Delete(AdminExe);
+                    }
+                    catch (IOException)
+                    {
+                        File.Move(AdminExe, Path.Combine(Dir, "PlugPass.old-" + DateTime.Now.ToString("yyyyMMddHHmmss") + ".exe"));
+                    }
+                }
+                File.Copy(Installer.CurrentExe, AdminExe);
+            }
             reg.SetDefault(ClsidKey, "PlugPass");
             Dictionary<string, object> server = new Dictionary<string, object>();
             server[""] = Dll;
@@ -471,7 +520,9 @@ namespace PlugPass
             {
                 return;
             }
-            foreach (string f in Directory.GetFiles(Dir, "PlugPassCredProv*.dll"))
+            List<string> files = new List<string>(Directory.GetFiles(Dir, "PlugPassCredProv*.dll"));
+            files.AddRange(Directory.GetFiles(Dir, "PlugPass*.exe"));
+            foreach (string f in files)
             {
                 try
                 {

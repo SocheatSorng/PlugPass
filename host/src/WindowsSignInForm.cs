@@ -110,7 +110,10 @@ namespace PlugPass
                 return;
             }
             bool on = WindowsKey.IsEnrolled(_root) && TileInstaller.IsInstalled;
-            _status.Text = on ? "Windows sign-in is ON for this drive." : "Windows sign-in is off for this drive.";
+            _status.Text = !on ? "Windows sign-in is off for this drive."
+                : WindowsKey.IsRejected(_root)
+                    ? "Windows rejected the saved password (did you change it?). Type your current password and click Update."
+                    : "Windows sign-in is ON for this drive.";
             _turnOn.Text = on ? "Update" : "Turn on";
             _turnOff.Visible = on;
         }
@@ -132,7 +135,7 @@ namespace PlugPass
             }
             catch (Exception ex)
             {
-                if (!(ex is IOException || ex is UnauthorizedAccessException))
+                if (!(ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException))
                 {
                     throw;
                 }
@@ -163,7 +166,7 @@ namespace PlugPass
             }
             catch (Exception ex)
             {
-                if (!(ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException))
+                if (!(ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException || ex is System.Security.SecurityException))
                 {
                     throw;
                 }
@@ -194,7 +197,7 @@ namespace PlugPass
             }
             catch (Exception ex)
             {
-                if (!(ex is IOException || ex is UnauthorizedAccessException))
+                if (!(ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException))
                 {
                     throw;
                 }

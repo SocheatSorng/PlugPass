@@ -39,7 +39,11 @@ nothing. Then open PlugPass → **Windows sign-in...** → **Turn off for all dr
 
 ## What PlugPass changed (for reference)
 
-- `C:\Program Files\PlugPass\PlugPassCredProv.dll`, the tile
+- `C:\Program Files\PlugPass\PlugPassCredProv.dll`, the tile (and `PlugPass.exe`, the admin copy of the app)
 - `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{9170534E-8919-480A-A99A-4EF4979FE7A3}`
 - `HKLM\SOFTWARE\Classes\CLSID\{9170534E-8919-480A-A99A-4EF4979FE7A3}`
-- `C:\ProgramData\PlugPass\signin\`, your encrypted password, one file per drive
+- `HKLM\SOFTWARE\PlugPass\SignIn`, your encrypted password, one value per drive (only SYSTEM and
+  Administrators can read it)
+
+If Windows rejected the saved password (you changed it), the tile stops on its own; open PlugPass →
+**Windows sign-in...**, type the new password and click **Update**.

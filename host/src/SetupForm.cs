@@ -243,8 +243,11 @@ namespace PlugPass
         {
             DriveItem d = _drives.SelectedItem as DriveItem;
             string drive = d == null ? "none" : d.Root.TrimEnd('\\');
+            // Elevate the admin-owned copy in Program Files when it is this same build; the per-user copy
+            // only for the first install or an update (the UAC prompt then shows its path).
+            string exe = TileInstaller.MatchingAdminExe() ?? Installer.CurrentExe;
             System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(
-                Installer.CurrentExe, "windows-setup " + drive + " \"" + Environment.UserName + "\"");
+                exe, "windows-setup " + drive + " \"" + Environment.UserName + "\"");
             psi.UseShellExecute = true;
             psi.Verb = "runas";
             try

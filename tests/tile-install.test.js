@@ -32,6 +32,10 @@ test("install-tile: DLL in (fake) Program Files, registered as a credential prov
   const r = run(["install-tile"]);
   assert.equal(r.code, 0, r.err);
   assert.ok(existsSync(dll));
+  assert.ok(
+    existsSync(join(home, "ProgramFiles", "PlugPass", "PlugPass.exe")),
+    "admin-owned copy of the app, elevated from then on",
+  );
   const reg = machine();
   assert.equal(reg[PROVIDER_KEY][""], "PlugPass");
   assert.equal(reg[`${CLSID_KEY}\\InprocServer32`][""], dll);

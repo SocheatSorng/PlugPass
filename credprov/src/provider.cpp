@@ -1,28 +1,36 @@
 // PlugPass sign-in tile (Windows credential provider).
 //
-// Shows one tile, and signs in automatically, only while a removable drive with a PlugPass Windows
-// sign-in is plugged in and its key decrypts this PC's half. Otherwise it reports zero tiles, so
-// Windows' own password tile is used as always. It serves sign-in and unlock only; every other use
-// (UAC, credential prompts in apps, password change) gets E_NOTIMPL. Never filters other providers.
-// If Windows rejects the password it handed over (e.g. the password was changed), it stops offering
-// that drive until the drive is unplugged, so it can't loop.
+// Shows one tile, and signs in automatically, only while a removable FAT32/exFAT drive with a PlugPass
+// Windows sign-in is plugged in, its key decrypts this PC's half, and the enrolled user is one Windows
+// is asking about (on the lock screen: the locked user). Otherwise zero tiles, so Windows' own password
+// tile is used as always. Serves sign-in and unlock only (E_NOTIMPL for UAC, CredUI, password change).
+// Never filters other providers.
 //
-// Everything here must fail closed and quietly: no exceptions escape, any problem means "no tile".
+// All drive access happens on a background thread; LogonUI's calls only read the cached result, so a
+// slow or failing USB stick can't freeze the sign-in screen. When Windows rejects the stored password
+// (changed password, account locked...) the enrolment is marked rejected in the registry, so no sign-in
+// screen retries it (no lockout from repeated tries) until the drive is enrolled again.
+//
+// Everything here must fail closed and quietly: no exception escapes, any problem means "no tile".
 
 #include <windows.h>
+#include <initguid.h>
 #include <credentialprovider.h>
 #include <ntsecapi.h>
+#include <propkey.h>
 #include <shlwapi.h>
 
 #include <atomic>
 #include <new>
 #include <string>
+#include <vector>
 
 #include "winkey.h"
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "secur32.lib")
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "ole32.lib")
 
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
@@ -46,57 +54,39 @@ enum FieldId
 const wchar_t kTitle[] = L"PlugPass USB key";
 const wchar_t kReady[] = L"Signing in with your PlugPass drive...";
 const wchar_t kFailed[] =
-    L"PlugPass couldn't sign you in. Use your password. If you changed it, set up the drive for Windows again in PlugPass.";
+    L"PlugPass couldn't sign you in. Use your password. If you changed it, turn on Windows sign-in for the drive again in PlugPass.";
 
-// Drives Windows rejected in this sign-in session (by enrolment ID). Cleared when the drive is removed.
-CRITICAL_SECTION g_lock;
-BYTE g_failedId[16];
-bool g_hasFailed = false;
-INIT_ONCE g_initOnce = INIT_ONCE_STATIC_INIT;
-
-BOOL CALLBACK InitLock(PINIT_ONCE, PVOID, PVOID*)
+// Results that mean "this stored password will never work": stop using it everywhere.
+bool IsPasswordProblem(NTSTATUS st)
 {
-    InitializeCriticalSection(&g_lock);
-    return TRUE;
-}
-
-void EnsureLock()
-{
-    InitOnceExecuteOnce(&g_initOnce, InitLock, nullptr, nullptr);
-}
-
-bool IsFailed(const BYTE id[16])
-{
-    EnsureLock();
-    EnterCriticalSection(&g_lock);
-    bool failed = g_hasFailed && memcmp(g_failedId, id, 16) == 0;
-    LeaveCriticalSection(&g_lock);
-    return failed;
-}
-
-void MarkFailed(const BYTE id[16])
-{
-    EnsureLock();
-    EnterCriticalSection(&g_lock);
-    memcpy(g_failedId, id, 16);
-    g_hasFailed = true;
-    LeaveCriticalSection(&g_lock);
-}
-
-void ForgetFailureUnless(const BYTE id[16], bool present)
-{
-    EnsureLock();
-    EnterCriticalSection(&g_lock);
-    if (g_hasFailed && (!present || memcmp(g_failedId, id, 16) != 0))
+    const NTSTATUS codes[] = {
+        static_cast<NTSTATUS>(0xC000006DL),  // STATUS_LOGON_FAILURE
+        static_cast<NTSTATUS>(0xC000006AL),  // STATUS_WRONG_PASSWORD
+        static_cast<NTSTATUS>(0xC0000234L),  // STATUS_ACCOUNT_LOCKED_OUT
+        static_cast<NTSTATUS>(0xC0000071L),  // STATUS_PASSWORD_EXPIRED
+        static_cast<NTSTATUS>(0xC0000224L),  // STATUS_PASSWORD_MUST_CHANGE
+        static_cast<NTSTATUS>(0xC0000072L),  // STATUS_ACCOUNT_DISABLED
+    };
+    for (NTSTATUS c : codes)
     {
-        g_hasFailed = false;
+        if (st == c)
+        {
+            return true;
+        }
     }
-    LeaveCriticalSection(&g_lock);
+    return false;
 }
 
 HRESULT DupString(const wchar_t* s, PWSTR* out)
 {
     return SHStrDupW(s, out);
+}
+
+std::wstring ComputerName()
+{
+    wchar_t name[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD n = ARRAYSIZE(name);
+    return GetComputerNameW(name, &n) ? std::wstring(name, n) : std::wstring(L".");
 }
 
 // Packs KERB_INTERACTIVE_UNLOCK_LOGON with string buffers stored as offsets from the start, as LSA
@@ -157,22 +147,21 @@ HRESULT NegotiatePackage(ULONG* package)
     return st == STATUS_SUCCESS ? S_OK : E_FAIL;
 }
 
-std::wstring ComputerName()
+// What the background thread found. Guarded by the provider's lock.
+struct DriveState
 {
-    wchar_t name[MAX_COMPUTERNAME_LENGTH + 1];
-    DWORD n = ARRAYSIZE(name);
-    return GetComputerNameW(name, &n) ? std::wstring(name, n) : std::wstring(L".");
-}
+    bool ready = false;  // a drive is in, and its key decrypts this PC's half
+    DriveKey key;
+    std::wstring user;  // enrolled user (no password kept)
+};
+
+class Provider;
 
 class Credential : public ICredentialProviderCredential
 {
 public:
-    explicit Credential(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus) : refs_(1), cpus_(cpus), events_(nullptr)
-    {
-        g_dllRefs++;
-    }
+    Credential(Provider* provider, CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus);
 
-    // IUnknown
     IFACEMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
     IFACEMETHODIMP_(ULONG) Release() override
     {
@@ -199,29 +188,8 @@ public:
         return E_NOINTERFACE;
     }
 
-    // ICredentialProviderCredential
-    IFACEMETHODIMP Advise(ICredentialProviderCredentialEvents* events) override
-    {
-        if (events_)
-        {
-            events_->Release();
-        }
-        events_ = events;
-        if (events_)
-        {
-            events_->AddRef();
-        }
-        return S_OK;
-    }
-    IFACEMETHODIMP UnAdvise() override
-    {
-        if (events_)
-        {
-            events_->Release();
-            events_ = nullptr;
-        }
-        return S_OK;
-    }
+    IFACEMETHODIMP Advise(ICredentialProviderCredentialEvents*) override { return S_OK; }
+    IFACEMETHODIMP UnAdvise() override { return S_OK; }
     IFACEMETHODIMP SetSelected(BOOL* autoLogon) override
     {
         if (!autoLogon)
@@ -279,114 +247,37 @@ public:
 
     IFACEMETHODIMP GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* response,
                                     CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* cs, PWSTR* statusText,
-                                    CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon) override
-    {
-        if (!response || !cs)
-        {
-            return E_POINTER;
-        }
-        *response = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-        ZeroMemory(cs, sizeof(*cs));
-        if (statusText)
-        {
-            *statusText = nullptr;
-        }
-        if (statusIcon)
-        {
-            *statusIcon = CPSI_NONE;
-        }
-        try
-        {
-            // Decrypt fresh, so the password lives in memory only for this call.
-            Enrolment e;
-            if (!LoadEnrolment(e) || IsFailed(e.id))
-            {
-                if (statusText)
-                {
-                    DupString(kFailed, statusText);
-                }
-                if (statusIcon)
-                {
-                    *statusIcon = CPSI_WARNING;
-                }
-                *response = CPGSR_NO_CREDENTIAL_FINISHED;
-                return S_OK;
-            }
-            memcpy(lastId_, e.id, 16);
-            ULONG package = 0;
-            HRESULT hr = NegotiatePackage(&package);
-            BYTE* buf = nullptr;
-            ULONG cb = 0;
-            if (SUCCEEDED(hr))
-            {
-                hr = PackLogon(cpus_, ComputerName(), e.user, e.password, &buf, &cb);
-            }
-            if (FAILED(hr))
-            {
-                return hr;
-            }
-            cs->ulAuthenticationPackage = package;
-            cs->clsidCredentialProvider = CLSID_PlugPassProvider;
-            cs->cbSerialization = cb;
-            cs->rgbSerialization = buf;  // owned (and freed) by LogonUI
-            *response = CPGSR_RETURN_CREDENTIAL_FINISHED;
-            return S_OK;
-        }
-        catch (...)
-        {
-            return E_FAIL;
-        }
-    }
-
+                                    CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon) override;
     IFACEMETHODIMP ReportResult(NTSTATUS status, NTSTATUS, PWSTR* statusText,
-                                CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon) override
-    {
-        if (statusText)
-        {
-            *statusText = nullptr;
-        }
-        if (statusIcon)
-        {
-            *statusIcon = CPSI_NONE;
-        }
-        if (status < 0)  // !NT_SUCCESS: stop offering this drive until it is replugged
-        {
-            MarkFailed(lastId_);
-            if (statusText)
-            {
-                DupString(kFailed, statusText);
-            }
-            if (statusIcon)
-            {
-                *statusIcon = CPSI_ERROR;
-            }
-        }
-        return S_OK;
-    }
+                                CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon) override;
+
+    void Detach() { provider_ = nullptr; }
 
 private:
-    ~Credential()
-    {
-        UnAdvise();
-        g_dllRefs--;
-    }
+    ~Credential();
 
     std::atomic<long> refs_;
+    Provider* provider_;  // not AddRef'd (would be a cycle); the provider detaches us when it goes
     CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus_;
-    ICredentialProviderCredentialEvents* events_;
     BYTE lastId_[16] = {};
 };
 
-class Provider : public ICredentialProvider
+struct WatchArgs
+{
+    Provider* provider;  // AddRef'd for the thread
+    HANDLE stop;         // the thread's own handle to the stop event
+    HMODULE module;      // keeps the DLL loaded until the thread exits
+};
+
+class Provider : public ICredentialProvider, public ICredentialProviderSetUserArray
 {
 public:
     Provider()
         : refs_(1), cpus_(CPUS_INVALID), events_(nullptr), context_(0), thread_(nullptr), stop_(nullptr),
-          credential_(nullptr), present_(false)
+          credential_(nullptr), haveUsers_(false), suppressed_(false)
     {
         g_dllRefs++;
-        EnsureLock();
-        InitializeCriticalSection(&stateLock_);
+        InitializeCriticalSection(&lock_);
     }
 
     IFACEMETHODIMP_(ULONG) AddRef() override { return ++refs_; }
@@ -408,11 +299,54 @@ public:
         if (riid == IID_IUnknown || riid == IID_ICredentialProvider)
         {
             *ppv = static_cast<ICredentialProvider*>(this);
-            AddRef();
-            return S_OK;
         }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
+        else if (riid == IID_ICredentialProviderSetUserArray)
+        {
+            *ppv = static_cast<ICredentialProviderSetUserArray*>(this);
+        }
+        else
+        {
+            *ppv = nullptr;
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+
+    // ICredentialProviderSetUserArray: the users Windows is asking about (on unlock: the locked user).
+    IFACEMETHODIMP SetUserArray(ICredentialProviderUserArray* users) override
+    {
+        try
+        {
+            std::vector<std::wstring> names;
+            DWORD count = 0;
+            if (users && SUCCEEDED(users->GetCount(&count)))
+            {
+                for (DWORD i = 0; i < count; i++)
+                {
+                    ICredentialProviderUser* u = nullptr;
+                    if (FAILED(users->GetAt(i, &u)) || !u)
+                    {
+                        continue;
+                    }
+                    PWSTR name = nullptr;
+                    if (SUCCEEDED(u->GetStringValue(PKEY_Identity_QualifiedUserName, &name)) && name)
+                    {
+                        names.push_back(name);
+                        CoTaskMemFree(name);
+                    }
+                    u->Release();
+                }
+            }
+            EnterCriticalSection(&lock_);
+            users_.swap(names);
+            haveUsers_ = users != nullptr;
+            LeaveCriticalSection(&lock_);
+        }
+        catch (...)
+        {
+        }
+        return S_OK;
     }
 
     IFACEMETHODIMP SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, DWORD) override
@@ -431,42 +365,38 @@ public:
 
     IFACEMETHODIMP Advise(ICredentialProviderEvents* events, UINT_PTR context) override
     {
-        StopWatcher();
-        EnterCriticalSection(&stateLock_);
-        if (events_)
+        try
         {
-            events_->Release();
-        }
-        events_ = events;
-        if (events_)
-        {
-            events_->AddRef();
-        }
-        context_ = context;
-        present_ = FindEnrolledDrive(presentId_);
-        LeaveCriticalSection(&stateLock_);
-        stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (stop_)
-        {
-            AddRef();  // the watcher holds a reference until it exits
-            thread_ = CreateThread(nullptr, 0, WatchThunk, this, 0, nullptr);
-            if (!thread_)
+            StopWatcher();
+            EnterCriticalSection(&lock_);
+            if (events_)
             {
-                Release();
+                events_->Release();
             }
+            events_ = events;
+            if (events_)
+            {
+                events_->AddRef();
+            }
+            context_ = context;
+            LeaveCriticalSection(&lock_);
+            StartWatcher();
+        }
+        catch (...)
+        {
         }
         return S_OK;
     }
     IFACEMETHODIMP UnAdvise() override
     {
         StopWatcher();
-        EnterCriticalSection(&stateLock_);
+        EnterCriticalSection(&lock_);
         if (events_)
         {
             events_->Release();
             events_ = nullptr;
         }
-        LeaveCriticalSection(&stateLock_);
+        LeaveCriticalSection(&lock_);
         return S_OK;
     }
 
@@ -509,6 +439,7 @@ public:
         return S_OK;
     }
 
+    // Reads only the cache the background thread keeps: never touches the drive.
     IFACEMETHODIMP GetCredentialCount(DWORD* count, DWORD* defaultIndex, BOOL* autoLogonWithDefault) override
     {
         if (!count || !defaultIndex || !autoLogonWithDefault)
@@ -518,19 +449,14 @@ public:
         *count = 0;
         *defaultIndex = CREDENTIAL_PROVIDER_NO_DEFAULT;
         *autoLogonWithDefault = FALSE;
-        try
+        EnterCriticalSection(&lock_);
+        bool offer = state_.ready && !suppressed_ && UserWanted();
+        LeaveCriticalSection(&lock_);
+        if (offer)
         {
-            Enrolment e;
-            if (LoadEnrolment(e) && !IsFailed(e.id))
-            {
-                *count = 1;
-                *defaultIndex = 0;
-                *autoLogonWithDefault = TRUE;  // drive in: sign in with no typing
-            }
-        }
-        catch (...)
-        {
-            *count = 0;
+            *count = 1;
+            *defaultIndex = 0;
+            *autoLogonWithDefault = TRUE;  // drive in: sign in with no typing
         }
         return S_OK;
     }
@@ -548,13 +474,39 @@ public:
         }
         if (!credential_)
         {
-            credential_ = new (std::nothrow) Credential(cpus_);
+            credential_ = new (std::nothrow) Credential(this, cpus_);
             if (!credential_)
             {
                 return E_OUTOFMEMORY;
             }
         }
         return credential_->QueryInterface(IID_ICredentialProviderCredential, reinterpret_cast<void**>(out));
+    }
+
+    // For the credential: a copy of the cached drive key (false if no drive is ready).
+    bool CurrentKey(DriveKey& key)
+    {
+        EnterCriticalSection(&lock_);
+        bool ok = state_.ready && !suppressed_ && UserWanted();
+        if (ok)
+        {
+            key = state_.key;
+        }
+        LeaveCriticalSection(&lock_);
+        return ok;
+    }
+
+    // Windows rejected the password: never again for a password problem (persisted), and not again
+    // in this sign-in screen for anything else, until the drive changes.
+    void Rejected(const BYTE id[16], NTSTATUS status)
+    {
+        if (IsPasswordProblem(status))
+        {
+            MarkRejected(id);
+        }
+        EnterCriticalSection(&lock_);
+        suppressed_ = true;
+        LeaveCriticalSection(&lock_);
     }
 
 private:
@@ -567,10 +519,72 @@ private:
         }
         if (credential_)
         {
+            credential_->Detach();
             credential_->Release();
         }
-        DeleteCriticalSection(&stateLock_);
+        state_.key.Clear();
+        DeleteCriticalSection(&lock_);
         g_dllRefs--;
+    }
+
+    // Caller holds lock_. Without a user list (older Windows) any enrolled user is fine.
+    bool UserWanted() const
+    {
+        if (!haveUsers_)
+        {
+            return true;
+        }
+        std::wstring qualified = ComputerName() + L"\\" + state_.user;
+        for (const std::wstring& u : users_)
+        {
+            if (_wcsicmp(u.c_str(), qualified.c_str()) == 0 || _wcsicmp(u.c_str(), state_.user.c_str()) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void StartWatcher()
+    {
+        HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!stop)
+        {
+            return;
+        }
+        WatchArgs* args = new (std::nothrow) WatchArgs();
+        HANDLE threadStop = nullptr;
+        HMODULE module = nullptr;
+        if (!args ||
+            !DuplicateHandle(GetCurrentProcess(), stop, GetCurrentProcess(), &threadStop, 0, FALSE,
+                             DUPLICATE_SAME_ACCESS) ||
+            !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(&WatchThunk),
+                                &module))
+        {
+            if (threadStop)
+            {
+                CloseHandle(threadStop);
+            }
+            delete args;
+            CloseHandle(stop);
+            return;
+        }
+        args->provider = this;
+        args->stop = threadStop;
+        args->module = module;
+        AddRef();
+        HANDLE thread = CreateThread(nullptr, 0, WatchThunk, args, 0, nullptr);
+        if (!thread)
+        {
+            Release();
+            CloseHandle(threadStop);
+            FreeLibrary(module);
+            delete args;
+            CloseHandle(stop);
+            return;
+        }
+        stop_ = stop;
+        thread_ = thread;
     }
 
     void StopWatcher()
@@ -578,6 +592,8 @@ private:
         if (thread_)
         {
             SetEvent(stop_);
+            // On timeout the thread keeps its own event handle, provider reference and DLL reference,
+            // so letting go of ours here is safe.
             WaitForSingleObject(thread_, 5000);
             CloseHandle(thread_);
             thread_ = nullptr;
@@ -589,37 +605,74 @@ private:
         }
     }
 
-    static DWORD WINAPI WatchThunk(LPVOID self)
+    static DWORD WINAPI WatchThunk(LPVOID param)
     {
-        Provider* p = static_cast<Provider*>(self);
-        p->Watch();
-        p->Release();
-        return 0;
+        WatchArgs* args = static_cast<WatchArgs*>(param);
+        HMODULE module = args->module;
+        try
+        {
+            DWORD oldMode = 0;
+            SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, &oldMode);
+            args->provider->Watch(args->stop);
+        }
+        catch (...)
+        {
+        }
+        args->provider->Release();
+        CloseHandle(args->stop);
+        delete args;
+        FreeLibraryAndExitThread(module, 0);
     }
 
-    // Polls for the drive being plugged in or pulled out and tells LogonUI to ask again.
-    void Watch()
+    // Looks for the drive now and every 1.5 s; tells LogonUI to ask again when anything changed.
+    void Watch(HANDLE stop)
     {
-        while (WaitForSingleObject(stop_, 1500) == WAIT_TIMEOUT)
+        DWORD wait = 0;
+        while (WaitForSingleObject(stop, wait) == WAIT_TIMEOUT)
         {
-            BYTE id[16] = {};
-            bool present = FindEnrolledDrive(id);
-            ForgetFailureUnless(id, present);
-            EnterCriticalSection(&stateLock_);
-            bool changed = present != present_ || (present && memcmp(id, presentId_, 16) != 0);
-            present_ = present;
-            memcpy(presentId_, id, 16);
-            ICredentialProviderEvents* events = events_;
-            UINT_PTR context = context_;
-            if (changed && events)
+            wait = 1500;
+            try
             {
-                events->AddRef();
+                DriveState found;
+                if (ProbeDrive(found.key))
+                {
+                    Enrolment e;
+                    if (Decrypt(found.key, e))
+                    {
+                        found.ready = true;
+                        found.user = e.user;
+                    }
+                }
+                if (!found.ready)
+                {
+                    found.key.Clear();
+                }
+                EnterCriticalSection(&lock_);
+                bool changed = found.ready != state_.ready ||
+                               (found.ready && (memcmp(found.key.id, state_.key.id, 16) != 0 ||
+                                                found.user != state_.user));
+                if (changed)
+                {
+                    state_.key.Clear();
+                    state_ = found;
+                    suppressed_ = false;  // a different drive (or none): start fresh
+                }
+                ICredentialProviderEvents* events = changed ? events_ : nullptr;
+                UINT_PTR context = context_;
+                if (events)
+                {
+                    events->AddRef();
+                }
+                LeaveCriticalSection(&lock_);
+                found.key.Clear();
+                if (events)
+                {
+                    events->CredentialsChanged(context);
+                    events->Release();
+                }
             }
-            LeaveCriticalSection(&stateLock_);
-            if (changed && events)
+            catch (...)
             {
-                events->CredentialsChanged(context);
-                events->Release();
             }
         }
     }
@@ -631,10 +684,121 @@ private:
     HANDLE thread_;
     HANDLE stop_;
     Credential* credential_;
-    CRITICAL_SECTION stateLock_;
-    bool present_;
-    BYTE presentId_[16] = {};
+    CRITICAL_SECTION lock_;
+    DriveState state_;
+    std::vector<std::wstring> users_;
+    bool haveUsers_;
+    bool suppressed_;
 };
+
+Credential::Credential(Provider* provider, CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus)
+    : refs_(1), provider_(provider), cpus_(cpus)
+{
+    g_dllRefs++;
+}
+
+Credential::~Credential()
+{
+    g_dllRefs--;
+}
+
+HRESULT Credential::GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* response,
+                                     CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* cs, PWSTR* statusText,
+                                     CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon)
+{
+    if (!response || !cs)
+    {
+        return E_POINTER;
+    }
+    *response = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
+    ZeroMemory(cs, sizeof(*cs));
+    if (statusText)
+    {
+        *statusText = nullptr;
+    }
+    if (statusIcon)
+    {
+        *statusIcon = CPSI_NONE;
+    }
+    try
+    {
+        // Decrypt from the cached drive key and the registry, so the password lives only for this call.
+        DriveKey key;
+        Enrolment e;
+        bool ok = provider_ && provider_->CurrentKey(key) && Decrypt(key, e);
+        memcpy(lastId_, key.id, 16);
+        key.Clear();
+        if (!ok)
+        {
+            if (statusText)
+            {
+                DupString(kFailed, statusText);
+            }
+            if (statusIcon)
+            {
+                *statusIcon = CPSI_WARNING;
+            }
+            *response = CPGSR_NO_CREDENTIAL_FINISHED;
+            return S_OK;
+        }
+        ULONG package = 0;
+        HRESULT hr = NegotiatePackage(&package);
+        BYTE* buf = nullptr;
+        ULONG cb = 0;
+        if (SUCCEEDED(hr))
+        {
+            hr = PackLogon(cpus_, ComputerName(), e.user, e.password, &buf, &cb);
+        }
+        if (FAILED(hr))
+        {
+            return hr;
+        }
+        cs->ulAuthenticationPackage = package;
+        cs->clsidCredentialProvider = CLSID_PlugPassProvider;
+        cs->cbSerialization = cb;
+        cs->rgbSerialization = buf;  // owned (and freed) by LogonUI
+        *response = CPGSR_RETURN_CREDENTIAL_FINISHED;
+        return S_OK;
+    }
+    catch (...)
+    {
+        return E_FAIL;
+    }
+}
+
+HRESULT Credential::ReportResult(NTSTATUS status, NTSTATUS, PWSTR* statusText, CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon)
+{
+    if (statusText)
+    {
+        *statusText = nullptr;
+    }
+    if (statusIcon)
+    {
+        *statusIcon = CPSI_NONE;
+    }
+    if (status < 0)  // !NT_SUCCESS
+    {
+        try
+        {
+            if (provider_)
+            {
+                provider_->Rejected(lastId_, status);
+            }
+        }
+        catch (...)
+        {
+        }
+        if (statusText)
+        {
+            DupString(kFailed, statusText);
+        }
+        if (statusIcon)
+        {
+            *statusIcon = CPSI_ERROR;
+        }
+    }
+    return S_OK;
+}
 
 class ClassFactory : public IClassFactory
 {

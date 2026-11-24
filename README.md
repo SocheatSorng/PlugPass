@@ -37,8 +37,18 @@ Good to know:
 - 8 wrong PINs in a row erase the key on the drive. Your password still works; set the drive up again
   and add it to Google again.
 - Without the drive, PlugPass stays out of the way and your browser behaves as usual.
-- **Uninstall:** Settings > Apps > PlugPass. Your drive keeps working after a reinstall. Remove the
+- **Uninstall:** if you turned on Windows sign-in, first open PlugPass → **Windows sign-in...** →
+  **Turn off for all drives** (that removes the sign-in tile, which needs admin rights). Then
+  Settings > Apps > PlugPass. Your drive keeps working for Google after a reinstall. Remove the
   extension from your browser too.
+
+## Windows sign-in (local account)
+
+PlugPass → **Windows sign-in...** (one admin prompt) → type your Windows password → **Turn on**. With the
+drive plugged in, Windows signs you in and unlocks without typing; without it, your password works as
+always. Needs a drive formatted as FAT32 or exFAT. Anyone holding the drive can sign in to this PC as
+you, so keep it safe; lost it? **Turn off for all drives**. If the sign-in screen ever misbehaves, see
+[docs/windows-signin-recovery.md](docs/windows-signin-recovery.md).
 
 ## How it works (short)
 

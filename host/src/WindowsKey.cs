@@ -6,6 +6,7 @@ using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
+using Microsoft.Win32;
 
 namespace PlugPass
 {
@@ -14,38 +15,28 @@ namespace PlugPass
     // On the drive, <drive>\PlugPass\windows.key (64 bytes, no PIN by design):
     //   "PPWINKEY" (8) | version = 1 (1) | reserved = 0 (7) | enrolment ID (16) | K (32)
     //
-    // On the PC, <ProtectedDir>\<enrolment ID hex>.bin = DPAPI(LocalMachine, entropy "PlugPass windows v1") of:
+    // On the PC, registry value <enrolment ID hex> (REG_BINARY) in the sign-in key, holding
+    // DPAPI(LocalMachine, entropy "PlugPass windows v1") of:
     //   "PPWINBLB" (8) | version = 1 (1) | reserved = 0 (7) | enrolment ID (16) | IV (16)
     //   | AES-256-CBC(encKey, plaintext) | HMAC-SHA256(macKey, everything before) (32)
     //   plaintext: user name length in UTF-16 units (2, LE) | user name (UTF-16LE) | password length (2) | password (UTF-16LE)
     //   encKey = HMAC-SHA256(K, "PlugPass windows enc v1"), macKey = HMAC-SHA256(K, "PlugPass windows mac v1").
+    // The sign-in tile writes "<id>.rejected" (REG_DWORD 1) there when Windows rejects the password
+    // (changed password): no sign-in screen retries it until the drive is enrolled again.
     //
-    // ProtectedDir = %ProgramData%\PlugPass\signin, readable only by SYSTEM and Administrators (the
-    // sign-in tile runs as SYSTEM). The C++ tile (credprov/) reads exactly this format: keep them in step.
+    // Sign-in key: HKLM\SOFTWARE\PlugPass\SignIn (64-bit view), owner Administrators, access SYSTEM +
+    // Administrators only. In the registry, not %ProgramData%: standard users can't create keys under
+    // HKLM\SOFTWARE (so they can't plant or own it) and there are no junctions to follow.
+    // The C++ tile (credprov/) reads exactly this format: keep them in step.
     internal static class WindowsKey
     {
         internal const string DriveFileName = "windows.key";
         internal const byte FormatVersion = 1;
+        internal const string SignInKey = @"SOFTWARE\PlugPass\SignIn";
         private const int DriveFileLength = 64;
         private static readonly byte[] DriveMagic = Encoding.ASCII.GetBytes("PPWINKEY");
         private static readonly byte[] BlobMagic = Encoding.ASCII.GetBytes("PPWINBLB");
         private static readonly byte[] Entropy = Encoding.ASCII.GetBytes("PlugPass windows v1");
-
-        internal static string ProtectedDir
-        {
-            get
-            {
-#if TESTHOOKS
-                string home = Environment.GetEnvironmentVariable("PLUGPASS_HOME");
-                if (!string.IsNullOrEmpty(home))
-                {
-                    return Path.Combine(home, "signin");
-                }
-#endif
-                return Path.Combine(Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "PlugPass"), "signin");
-            }
-        }
 
         internal static string DrivePath(string root)
         {
@@ -57,39 +48,63 @@ namespace PlugPass
             return File.Exists(DrivePath(root));
         }
 
+        // True when the sign-in tile recorded that Windows rejected this drive's stored password.
+        internal static bool IsRejected(string root)
+        {
+            byte[] d = ReadDriveFile(root);
+            if (d == null)
+            {
+                return false;
+            }
+            using (RegistryKey k = OpenStore(false))
+            {
+                return k != null && k.GetValue(Program.Hex(Slice(d, 16, 16)) + ".rejected") != null;
+            }
+        }
+
         // Lost drive: deletes this PC's half of every enrolment, so no drive can sign in any more.
         internal static void RemoveAll()
         {
-            if (!Directory.Exists(ProtectedDir))
+            using (RegistryKey k = OpenStore(true))
             {
-                return;
-            }
-            foreach (string f in Directory.GetFiles(ProtectedDir, "*.bin"))
-            {
-                File.Delete(f);
+                foreach (string name in k.GetValueNames())
+                {
+                    k.DeleteValue(name, false);
+                }
             }
         }
 
         // Whether any drive still signs in on this PC (the sign-in tile is only needed then).
         internal static bool AnyEnrolments()
         {
-            return Directory.Exists(ProtectedDir) && Directory.GetFiles(ProtectedDir, "*.bin").Length > 0;
+            using (RegistryKey k = OpenStore(false))
+            {
+                if (k == null)
+                {
+                    return false;
+                }
+                foreach (string name in k.GetValueNames())
+                {
+                    if (name.Length == 32)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
         }
 
         // Stores the password for `user` so this drive can sign them in. Replaces this drive's earlier
-        // enrolment. Requires admin rights (writes the protected folder), except in the test build.
+        // enrolment. Requires admin rights (writes HKLM), except in the test build.
         internal static void Enrol(string root, string user, string password)
         {
             if (string.IsNullOrEmpty(user) || user.Length > 256 || password == null || password.Length > 256)
             {
                 throw new ArgumentException("Invalid user name or password.");
             }
+            RequireLinkFreeDrive(root);
             string folder = Path.Combine(root, KeyFile.FolderName);
             Directory.CreateDirectory(folder);
-            if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new IOException("The PlugPass folder on this drive is a link; refusing to write.");
-            }
             byte[] old = ReadDriveFile(root);
             byte[] enrolId = KeyFile.Random(16);
             byte[] k = KeyFile.Random(32);
@@ -119,15 +134,18 @@ namespace PlugPass
                 blob = Bytes.Concat(head, h.ComputeHash(head));
             }
 
-            EnsureProtectedDir();
-            WriteAtomic(BlobPath(enrolId), ProtectedData.Protect(blob, Entropy, DataProtectionScope.LocalMachine));
+            using (RegistryKey store = OpenStore(true))
+            {
+                store.SetValue(Program.Hex(enrolId), ProtectedData.Protect(blob, Entropy, DataProtectionScope.LocalMachine),
+                    RegistryValueKind.Binary);
+            }
             byte[] driveFile = Bytes.Concat(DriveMagic, new byte[] { FormatVersion, 0, 0, 0, 0, 0, 0, 0 }, enrolId, k);
             WriteAtomic(DrivePath(root), driveFile);
             Array.Clear(driveFile, 0, driveFile.Length);
             Array.Clear(k, 0, k.Length);
             if (old != null)
             {
-                DeleteBlob(Slice(old, 16, 16)); // the drive's previous enrolment is no longer usable
+                DeleteEnrolment(Slice(old, 16, 16)); // the drive's previous enrolment is no longer usable
             }
         }
 
@@ -137,7 +155,7 @@ namespace PlugPass
             byte[] current = ReadDriveFile(root);
             if (current != null)
             {
-                DeleteBlob(Slice(current, 16, 16));
+                DeleteEnrolment(Slice(current, 16, 16));
             }
             string path = DrivePath(root);
             if (File.Exists(path))
@@ -157,12 +175,16 @@ namespace PlugPass
             {
                 return null;
             }
-            string path = BlobPath(Slice(d, 16, 16));
-            if (!File.Exists(path))
+            byte[] wrapped;
+            using (RegistryKey store = OpenStore(false))
+            {
+                wrapped = store == null ? null : store.GetValue(Program.Hex(Slice(d, 16, 16))) as byte[];
+            }
+            if (wrapped == null)
             {
                 return null;
             }
-            byte[] blob = ProtectedData.Unprotect(File.ReadAllBytes(path), Entropy, DataProtectionScope.LocalMachine);
+            byte[] blob = ProtectedData.Unprotect(wrapped, Entropy, DataProtectionScope.LocalMachine);
             byte[] k = Slice(d, 32, 32);
             int macAt = blob.Length - 32;
             using (HMACSHA256 h = new HMACSHA256(Derive(k, "PlugPass windows mac v1")))
@@ -190,6 +212,65 @@ namespace PlugPass
         }
 #endif
 
+        // The sign-in key. write: create it if needed and (re)apply owner + access rules.
+        // Test build: with PLUGPASS_TEST_REGKEY set, a throwaway key under HKCU\Software\PlugPassTest.
+        private static RegistryKey OpenStore(bool write)
+        {
+#if TESTHOOKS
+            string test = Environment.GetEnvironmentVariable("PLUGPASS_TEST_REGKEY");
+            if (!string.IsNullOrEmpty(test))
+            {
+                string path = @"Software\PlugPassTest\" + test + @"\SignIn";
+                return write ? Registry.CurrentUser.CreateSubKey(path) : Registry.CurrentUser.OpenSubKey(path);
+            }
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PLUGPASS_HOME")))
+            {
+                throw new InvalidOperationException("Test build: set PLUGPASS_TEST_REGKEY for Windows sign-in.");
+            }
+#endif
+            RegistryKey hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            if (!write)
+            {
+                return hklm.OpenSubKey(SignInKey);
+            }
+            RegistrySecurity sec = new RegistrySecurity();
+            sec.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+            sec.SetAccessRuleProtection(true, false);
+            sec.AddAccessRule(new RegistryAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                RegistryRights.FullControl, InheritanceFlags.ContainerInherit, PropagationFlags.None, AccessControlType.Allow));
+            sec.AddAccessRule(new RegistryAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
+                RegistryRights.FullControl, InheritanceFlags.ContainerInherit, PropagationFlags.None, AccessControlType.Allow));
+            RegistryKey key = hklm.CreateSubKey(SignInKey, RegistryKeyPermissionCheck.ReadWriteSubTree, sec);
+            key.SetAccessControl(sec); // an existing key gets the same owner and rules
+            return key;
+        }
+
+        private static void DeleteEnrolment(byte[] enrolId)
+        {
+            using (RegistryKey store = OpenStore(true))
+            {
+                store.DeleteValue(Program.Hex(enrolId), false);
+                store.DeleteValue(Program.Hex(enrolId) + ".rejected", false);
+            }
+        }
+
+        // Windows sign-in only uses FAT32/exFAT drives: they can't hold links, so nothing on the drive
+        // can redirect reads (by the SYSTEM-run tile) or writes (by this elevated app) elsewhere.
+        private static void RequireLinkFreeDrive(string root)
+        {
+#if TESTHOOKS
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PLUGPASS_HOME")))
+            {
+                return; // tests use a folder on NTFS as the drive
+            }
+#endif
+            string format = new DriveInfo(root).DriveFormat;
+            if (!format.StartsWith("FAT", StringComparison.OrdinalIgnoreCase) && !format.Equals("exFAT", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException("Windows sign-in needs a drive formatted as FAT32 or exFAT (this one is " + format + ").");
+            }
+        }
+
         // Null when the drive has no (valid) Windows sign-in file.
         private static byte[] ReadDriveFile(string root)
         {
@@ -211,40 +292,6 @@ namespace PlugPass
                 }
             }
             return d;
-        }
-
-        private static string BlobPath(byte[] enrolId)
-        {
-            return Path.Combine(ProtectedDir, Program.Hex(enrolId) + ".bin");
-        }
-
-        private static void DeleteBlob(byte[] enrolId)
-        {
-            string path = BlobPath(enrolId);
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-
-        // %ProgramData%\PlugPass\signin: SYSTEM and Administrators only, nothing inherited.
-        private static void EnsureProtectedDir()
-        {
-            Directory.CreateDirectory(ProtectedDir);
-#if TESTHOOKS
-            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PLUGPASS_HOME")))
-            {
-                return; // test folders stay readable so tests can clean up
-            }
-#endif
-            DirectorySecurity sec = new DirectorySecurity();
-            sec.SetAccessRuleProtection(true, false);
-            InheritanceFlags inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-            sec.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
-                FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
-            sec.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null),
-                FileSystemRights.FullControl, inherit, PropagationFlags.None, AccessControlType.Allow));
-            Directory.SetAccessControl(ProtectedDir, sec);
         }
 
         private static void WriteAtomic(string path, byte[] data)

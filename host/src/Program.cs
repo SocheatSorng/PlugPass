@@ -229,6 +229,18 @@ namespace PlugPass
             {
                 return Fail(6, "Couldn't save: " + ex.Message);
             }
+            catch (ArgumentException ex)
+            {
+                return Fail(7, ex.Message); // e.g. not FAT32/exFAT, password too long
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Fail(6, "Couldn't save: " + ex.Message);
+            }
+            catch (System.Security.SecurityException ex)
+            {
+                return Fail(6, "Couldn't save: " + ex.Message);
+            }
             Console.WriteLine("Drive " + root + " can now sign in " + user + ".");
             return 0;
         }
@@ -259,6 +271,14 @@ namespace PlugPass
                 return Fail(6, "Couldn't remove: " + ex.Message);
             }
             catch (UnauthorizedAccessException ex)
+            {
+                return Fail(6, "Couldn't remove: " + ex.Message);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Fail(6, "Couldn't remove: " + ex.Message);
+            }
+            catch (System.Security.SecurityException ex)
             {
                 return Fail(6, "Couldn't remove: " + ex.Message);
             }
