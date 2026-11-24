@@ -1,0 +1,43 @@
+# Install once:  pip install pre-commit   (or: uv tool install pre-commit)
+# Then:          pre-commit install        (runs on every commit)
+# Refresh pins:  pre-commit autoupdate
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-json
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/woodruffw/zizmor-pre-commit
+    rev: v1.33.1
+    hooks:
+      - id: zizmor
+
+  - repo: local
+    hooks:
+      # C# warnings as errors, ESLint with eslint-plugin-security (the code security scanner for the
+      # extension), Prettier and text checks. CodeQL in CI scans the C# and JavaScript too.
+      - id: plugpass-lint
+        name: PlugPass lint (C# warnings, ESLint + security, Prettier, formatting)
+        entry: powershell -NoProfile -ExecutionPolicy Bypass -File lint.ps1
+        language: system
+        pass_filenames: false
+        files: \.(cs|ps1|js|md|ya?ml|json)$
+
+      - id: npm-audit
+        name: npm audit (dependency vulnerabilities)
+        entry: npm.cmd audit --audit-level=moderate
+        language: system
+        pass_filenames: false
+        files: ^package(-lock)?\.json$

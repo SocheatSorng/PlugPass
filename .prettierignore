@@ -1,0 +1,8 @@
+bin/
+dist/
+node_modules/
+tests/out/
+package-lock.json
+*.md
+*.cs
+*.ps1

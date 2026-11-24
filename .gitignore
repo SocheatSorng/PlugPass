@@ -1,0 +1,40 @@
+# Build output
+bin/
+obj/
+dist/
+*.exe
+*.dll
+*.pdb
+*.zip
+
+# Dependencies and caches
+node_modules/
+.eslintcache
+.npm/
+
+# Test scratch output (fake drives, fake keys)
+tests/out/
+
+# Secrets: never commit these. Real keys live on the USB drive and in %LOCALAPPDATA%\PlugPass.
+.env
+.env.*
+*.pfx
+*.p12
+*.pem
+*.key
+*.snk
+*.crx
+credentials*.json
+secrets*.json
+*.ppkey
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Editors / OS
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
