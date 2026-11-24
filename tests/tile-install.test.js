@@ -56,8 +56,16 @@ test("uninstall-tile: unregistered and files removed", () => {
   assert.equal(existsSync(join(home, "ProgramFiles", "PlugPass")), false);
 });
 
-test("the real build refuses without admin rights (tests never run elevated)", () => {
-  const r = run(["install-tile"], realExe);
-  assert.equal(r.code, 9, r.err);
-  assert.equal(run(["windows-setup", "Q:", "nobody"], realExe).code === 0, false);
-});
+// GitHub's Windows runners run as administrator: there the real build WOULD install the tile, so
+// this check only runs unelevated (as on a developer PC). `net session` succeeds only when elevated.
+const elevated = spawnSync("net", ["session"], { stdio: "ignore" }).status === 0;
+
+test(
+  "the real build refuses without admin rights",
+  { skip: elevated && "running as administrator" },
+  () => {
+    const r = run(["install-tile"], realExe);
+    assert.equal(r.code, 9, r.err);
+    assert.equal(run(["windows-setup", "Q:", "nobody"], realExe).code === 0, false);
+  },
+);
