@@ -46,14 +46,16 @@ function loadInject(answer) {
     create: async (o) => (originalCalls.push(["create", o]), "browser-create"),
     get: async (o) => (originalCalls.push(["get", o]), "browser-get"),
   };
+  const logs = [];
   const ctx = vm.createContext({
     window: win,
     navigator: { credentials },
     atob,
     DOMException,
+    console: { info: (m) => logs.push(m) },
   });
   vm.runInContext(source("inject.js"), ctx);
-  return { credentials, posted, originalCalls, win };
+  return { credentials, posted, originalCalls, win, logs };
 }
 
 const createOptions = (sel = {}) => ({
@@ -177,13 +179,26 @@ test("inject: requests PlugPass can't serve go straight to the browser", async (
     assert.equal(r, `browser-${kind}`, JSON.stringify(options));
   }
   assert.equal(page.posted.length, 0);
+  // Every WebAuthn case says why in the console (the password request isn't WebAuthn: silent).
+  assert.equal(page.logs.length, cases.length - 1);
+  assert.match(page.logs[0], /^PlugPass: create handed to the browser: .*residentKey: required/);
+  assert.match(page.logs[2], /userVerification: required/);
+  assert.match(page.logs[6], /conditional mediation/);
 });
 
 test("inject: a fallback reply hands the same request to the browser", async () => {
-  const page = loadInject(() => ({ status: "error", name: "NotAllowedError", fallback: true }));
+  const page = loadInject(() => ({
+    status: "error",
+    name: "NotAllowedError",
+    message: "This account doesn't use this PlugPass key.",
+    fallback: true,
+  }));
   const options = getOptions();
   assert.equal(await page.credentials.get(options), "browser-get");
   assert.equal(page.originalCalls[0][1], options);
+  assert.deepEqual(page.logs, [
+    "PlugPass: get handed to the browser: This account doesn't use this PlugPass key.",
+  ]);
 });
 
 test("inject: a refusal rejects with the named DOMException", async () => {

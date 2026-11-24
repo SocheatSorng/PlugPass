@@ -41,25 +41,32 @@
     });
   }
 
-  function wants(kind, options) {
-    const pk = options && options.publicKey;
-    if (!pk || options.mediation === "conditional") {
-      return false;
+  // Why PlugPass can't serve this request ("" = it can). Shown in the console to help diagnose sites.
+  function skipReason(kind, options) {
+    const pk = options.publicKey;
+    if (options.mediation === "conditional") {
+      return "passkey autofill (conditional mediation)";
     }
     if (kind === "create") {
       const sel = pk.authenticatorSelection || {};
-      return (
-        sel.authenticatorAttachment !== "platform" &&
-        sel.residentKey !== "required" &&
-        sel.requireResidentKey !== true &&
-        sel.userVerification !== "required"
-      );
+      if (sel.authenticatorAttachment === "platform")
+        return "site wants this device's own authenticator";
+      if (sel.residentKey === "required" || sel.requireResidentKey === true) {
+        return "site wants a passkey stored on the key (residentKey: required)";
+      }
+      if (sel.userVerification === "required")
+        return "site wants a PIN (userVerification: required)";
+      return "";
     }
-    return (
-      pk.userVerification !== "required" &&
-      Array.isArray(pk.allowCredentials) &&
-      pk.allowCredentials.length > 0
-    );
+    if (pk.userVerification === "required") return "site wants a PIN (userVerification: required)";
+    if (!Array.isArray(pk.allowCredentials) || pk.allowCredentials.length === 0) {
+      return "site wants a passkey stored on the key (no allowCredentials)";
+    }
+    return "";
+  }
+
+  function note(kind, text) {
+    console.info(`PlugPass: ${kind} handed to the browser: ${text}`);
   }
 
   function toBuffer(s) {
@@ -107,7 +114,12 @@
   }
 
   async function handle(kind, options, original) {
-    if (!wants(kind, options)) {
+    if (!options || !options.publicKey) {
+      return original(options); // passwords, federated sign-in: not ours
+    }
+    const reason = skipReason(kind, options);
+    if (reason) {
+      note(kind, reason);
       return original(options);
     }
     if (options.signal && options.signal.aborted) {
@@ -117,12 +129,14 @@
     try {
       reply = await ask(kind, options.publicKey);
     } catch {
+      note(kind, "request couldn't be passed to PlugPass");
       return original(options);
     }
     if (reply && reply.status === "ok" && reply.credential) {
       return makeCredential(reply.credential);
     }
     if (!reply || reply.fallback) {
+      note(kind, String((reply && reply.message) || "no reply from PlugPass"));
       return original(options);
     }
     throw new DOMException(String(reply.message || "PlugPass refused"), String(reply.name));
