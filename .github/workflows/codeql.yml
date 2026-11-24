@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch: # "Run workflow" button on the Actions page
   schedule:
     - cron: "29 4 * * 1" # weekly, Monday 04:29 UTC
 
