@@ -14,10 +14,36 @@ namespace PlugPass
     // --auto-deny and PLUGPASS_TEST_PIN answer the PIN window without showing it.
     //
     // Exit codes: 0 ok, 2 usage, 3 wrong PIN, 4 key erased (too many wrong PINs), 5 set up on another PC,
-    // 6 no key / unreadable, 7 refused (PIN rules, key already there, not a removable drive).
+    // 6 no key / unreadable / can't write, 7 refused (PIN rules, key already there, not a removable drive),
+    // 8 locked (the drive says it already used up its tries; nothing is erased on its word).
     internal static class Program
     {
         internal const string Version = "0.2.0";
+        internal const string ExtensionOrigin = "chrome-extension://amppkfbnjicgeeakigkmafdllhknaigl/";
+
+        // Runs a key command while holding the key-file lock; a drive that can't be written is an error.
+        private static int Locked(Func<int> command)
+        {
+            using (KeyLock held = KeyLock.Acquire(60 * 1000))
+            {
+                if (held == null)
+                {
+                    return Fail(6, "Another PlugPass window is still open.");
+                }
+                try
+                {
+                    return command();
+                }
+                catch (IOException ex)
+                {
+                    return Fail(6, "Couldn't write to the drive: " + ex.Message);
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    return Fail(6, "Couldn't write to the drive: " + ex.Message);
+                }
+            }
+        }
 
         [STAThread]
         private static int Main(string[] args)
@@ -33,15 +59,20 @@ namespace PlugPass
             }
             if (args.Length >= 1 && args[0].StartsWith("chrome-extension://", StringComparison.Ordinal))
             {
+                // Browsers already enforce allowed_origins; this also stops other programs posing as one.
+                if (args[0] != ExtensionOrigin)
+                {
+                    return Fail(2, "Unknown extension.");
+                }
                 return NativeHost.Run(ChoosePrompt(args), args);
             }
             if (args.Length == 2 && args[0] == "create-key")
             {
-                return CreateKey(args[1]);
+                return Locked(delegate { return CreateKey(args[1]); });
             }
             if (args.Length == 2 && args[0] == "change-pin")
             {
-                return ChangePin(args[1]);
+                return Locked(delegate { return ChangePin(args[1]); });
             }
             if (args.Length == 2 && args[0] == "key-info")
             {
@@ -50,7 +81,7 @@ namespace PlugPass
 #if TESTHOOKS
             if (args.Length == 2 && args[0] == "unlock-check")
             {
-                return UnlockCheck(args[1]);
+                return Locked(delegate { return UnlockCheck(args[1]); });
             }
 #endif
             Console.Error.WriteLine("Usage: PlugPass [setup] | version | create-key <drive> | change-pin <drive> | key-info <drive>");
@@ -151,6 +182,8 @@ namespace PlugPass
                     return Fail(3, "Wrong PIN. " + kf.TriesLeft + " tries left.");
                 case UnlockResult.Wiped:
                     return Fail(4, "Too many wrong PINs: the PlugPass key on this drive was erased.");
+                case UnlockResult.Locked:
+                    return Fail(8, "This PlugPass drive is locked after too many wrong PINs.");
                 case UnlockResult.OtherPc:
                     return Fail(5, "This drive was set up on another PC.");
                 default:

@@ -1,8 +1,9 @@
-# DEVELOPMENT ONLY (phase 1): tells Chrome, Edge and Brave where the PlugPass helper app is, for the current
-# Windows user only (HKCU). Changes your registry: run it only when you mean to test in your browser.
-#   .\tools\dev-register.ps1              register bin\PlugPass.exe (the real build, with the consent window)
+# DEVELOPMENT ONLY (until there's an installer): tells Chrome, Edge and Brave where the PlugPass helper
+# app is, for the current Windows user only (HKCU). Changes your registry: run it only when you mean to
+# test in your browser.
+#   .\tools\dev-register.ps1              register bin\PlugPass.exe (the real build, with the PIN window)
 #   .\tools\dev-register.ps1 -Unregister  remove the registration again
-# Then load bin\extension in chrome://extensions (Developer mode > Load unpacked).
+# Then load bin\extension in chrome://, edge:// or brave://extensions (Developer mode > Load unpacked).
 param([switch]$Unregister)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent

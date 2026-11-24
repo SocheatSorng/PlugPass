@@ -4,9 +4,17 @@
 // holds this PC's half of the key, so real drives and real keys are never touched. PINs are fake.
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, createPublicKey, verify, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
@@ -328,6 +336,91 @@ test("8 wrong PINs in a row erase the key: drive file and this PC's half", () =>
   assert.equal(existsSync(keyPath(root)), false, "drive file erased");
   assert.deepEqual(readdirSync(join(root, "PlugPass")), [], "nothing else left in PlugPass folder");
   assert.equal(cli(["key-info", root]).code, 6);
+});
+
+test("a drive claiming its tries are used up is locked, but nothing is erased on its word", () => {
+  const root = newDrive("drive-claims-locked");
+  const bytes = readFileSync(keyPath(root));
+  bytes[9] = 8; // the wrong-PIN count isn't covered by the MAC, so anyone could set it
+  writeFileSync(keyPath(root), bytes);
+  const r = cli(["unlock-check", root], [PIN]);
+  assert.equal(r.code, 8, r.err);
+  assert.equal(existsSync(keyPath(root)), true, "drive file kept");
+  assert.match(cli(["key-info", root]).out, /this-pc/, "this PC's half kept");
+  const { reply, log } = send(getRequest([]), { root });
+  assert.equal(reply.fallback, true);
+  assert.match(log.at(-1), /^tell:This PlugPass drive is locked/);
+});
+
+test("each try is counted on the drive before the PIN is checked", () => {
+  const root = newDrive("drive-readonly");
+  chmodSync(keyPath(root), 0o444); // the count can't be saved, so the PIN must not be tested
+  try {
+    const r = cli(["unlock-check", root], [PIN]);
+    assert.equal(r.code, 6, r.err);
+    assert.equal(r.out.includes("ok"), false);
+  } finally {
+    chmodSync(keyPath(root), 0o666);
+  }
+  assert.equal(cli(["unlock-check", root], [PIN]).code, 0, "works again once writable");
+});
+
+test("parallel attempts can't share one try (one PlugPass at a time)", async () => {
+  const root = newDrive("drive-parallel");
+  const run = (pin) =>
+    new Promise((resolve) => {
+      const p = spawn(exe, ["unlock-check", root], {
+        env: { ...process.env, PLUGPASS_HOME: home },
+      });
+      p.stdin.end(`${pin}\r\n`);
+      p.on("exit", resolve);
+    });
+  const codes = await Promise.all([1, 2, 3, 4].map((i) => run(`wrong-pin-${i}`)));
+  assert.deepEqual(codes, [3, 3, 3, 3]);
+  assert.match(cli(["key-info", root]).out, /tries-left 4 /);
+});
+
+test("links on the drive are never followed", () => {
+  const root = newDrive("drive-links");
+  // A planted temp-file link pointing at a folder elsewhere: removed, and the target is untouched.
+  const victim = join(out, "victim");
+  mkdirSync(victim, { recursive: true });
+  writeFileSync(join(victim, "keep.txt"), "important");
+  const temp = `${keyPath(root)}.tmp`;
+  assert.equal(spawnSync("cmd", ["/c", "mklink", "/J", temp, victim]).status, 0);
+  assert.equal(cli(["unlock-check", root], ["wrong-pin-1"]).code, 3);
+  assert.equal(readFileSync(join(victim, "keep.txt"), "utf8"), "important");
+  assert.equal(existsSync(temp), false);
+  // A PlugPass folder that is itself a link: refused.
+  const linked = join(out, "drive-linked-folder");
+  mkdirSync(linked, { recursive: true });
+  assert.equal(
+    spawnSync("cmd", ["/c", "mklink", "/J", join(linked, "PlugPass"), join(root, "PlugPass")])
+      .status,
+    0,
+  );
+  assert.equal(cli(["key-info", linked]).code, 6);
+});
+
+test("a key file asking for absurd PBKDF2 work is refused", () => {
+  const root = newDrive("drive-iterations");
+  const bytes = readFileSync(keyPath(root));
+  bytes.writeInt32LE(100000000, 12);
+  writeFileSync(keyPath(root), bytes);
+  assert.equal(cli(["key-info", root]).code, 6);
+});
+
+test("only the PlugPass extension may start the helper as a native host", () => {
+  const r = spawnSync(
+    exe,
+    ["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/", "--auto-approve"],
+    {
+      input: frame(createRequest()),
+      env: { ...process.env, PLUGPASS_HOME: home },
+    },
+  );
+  assert.equal(r.status, 2);
+  assert.equal(r.stdout.length, 0);
 });
 
 test("wiping through the PIN window tells the person and lets the browser take over", () => {

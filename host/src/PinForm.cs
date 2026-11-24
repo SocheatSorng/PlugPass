@@ -11,6 +11,7 @@ namespace PlugPass
     {
         private readonly TextBox _pin;
         private readonly Label _error;
+        private readonly Label _warn;
         private Decision _decision = Decision.Cancel;
 
         internal PinForm(PinQuestion q)
@@ -32,7 +33,9 @@ namespace PlugPass
             layout.ColumnCount = 1;
             layout.Dock = DockStyle.Fill;
 
-            Label title = NewLabel(q.IsCreate ? "Add your PlugPass key to " + q.RpId + "?" : "Sign in to " + q.RpId + " with PlugPass?", 8);
+            layout.Margin = Padding.Empty;
+
+            Label title = NewLabel(q.IsCreate ? "Add your PlugPass key to " + q.RpId + "?" : "Sign in to " + q.RpId + " with PlugPass?", 12);
             title.Font = new Font("Segoe UI Semibold", 11f);
             layout.Controls.Add(title);
             layout.Controls.Add(NewLabel("Only continue if you started this yourself on " + q.RpId + ". Enter your PlugPass PIN:", 8));
@@ -41,30 +44,38 @@ namespace PlugPass
             _pin.UseSystemPasswordChar = true;
             _pin.MaxLength = KeyFile.MaxPinLength;
             _pin.Width = 260;
-            _pin.Margin = new Padding(0, 0, 0, 8);
+            _pin.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            _pin.Margin = Padding.Empty;
             layout.Controls.Add(_pin);
 
-            _error = NewLabel(q.Error ?? "", 8);
+            // One message under the PIN box. A wrong-PIN error already says how many tries are left, so
+            // the orange "tries left" warning shows only when there is no such error.
+            _error = NewLabel(q.Error ?? "", 0);
+            _error.Margin = new Padding(0, 8, 0, 0);
             _error.ForeColor = Color.FromArgb(196, 43, 28);
             _error.Visible = !string.IsNullOrEmpty(q.Error);
             layout.Controls.Add(_error);
 
             if (q.TriesLeft <= 3)
             {
-                Label warn = NewLabel("After " + q.TriesLeft + " more wrong " + (q.TriesLeft == 1 ? "PIN" : "PINs")
-                    + ", the key on this drive is erased.", 8);
-                warn.ForeColor = Color.FromArgb(157, 93, 0);
-                layout.Controls.Add(warn);
+                _warn = NewLabel("After " + q.TriesLeft + " more wrong " + (q.TriesLeft == 1 ? "PIN" : "PINs")
+                    + ", the key on this drive is erased.", 0);
+                _warn.Margin = new Padding(0, 8, 0, 0);
+                _warn.ForeColor = Color.FromArgb(157, 93, 0);
+                _warn.Visible = !_error.Visible;
+                layout.Controls.Add(_warn);
             }
 
             FlowLayoutPanel buttons = new FlowLayoutPanel();
             buttons.AutoSize = true;
             buttons.FlowDirection = FlowDirection.RightToLeft;
             buttons.Dock = DockStyle.Fill;
-            buttons.Margin = new Padding(0, 8, 0, 0);
+            buttons.Margin = new Padding(0, 16, 0, 0);
+            buttons.Padding = Padding.Empty;
             Button cancel = NewButton("Cancel", Decision.Cancel);
             Button other = NewButton("Use another key", Decision.Fallback);
             Button allow = NewButton(q.IsCreate ? "Add" : "Sign in", Decision.Allow);
+            SameWidth(allow, other, cancel);
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(other);
             buttons.Controls.Add(allow);
@@ -96,6 +107,20 @@ namespace PlugPass
             return l;
         }
 
+        // Gives buttons in one row the width of the widest, so the row reads as one set.
+        internal static void SameWidth(params Button[] row)
+        {
+            int width = 0;
+            foreach (Button b in row)
+            {
+                width = Math.Max(width, Math.Max(b.MinimumSize.Width, b.GetPreferredSize(Size.Empty).Width));
+            }
+            foreach (Button b in row)
+            {
+                b.MinimumSize = new Size(width, b.MinimumSize.Height);
+            }
+        }
+
         private Button NewButton(string text, Decision d)
         {
             Button b = new Button();
@@ -110,6 +135,11 @@ namespace PlugPass
                     // Too short to be the PIN: say so without spending one of the tries.
                     _error.Text = "Your PIN has at least " + KeyFile.MinPinLength + " characters.";
                     _error.Visible = true;
+                    if (_warn != null)
+                    {
+                        // The wrong-PIN error was replaced: keep the tries-left warning in view.
+                        _warn.Visible = true;
+                    }
                     _pin.Focus();
                     return;
                 }
@@ -143,19 +173,24 @@ namespace PlugPass
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.AutoSize = true;
             layout.ColumnCount = 1;
+            layout.Dock = DockStyle.Fill;
+            layout.Margin = Padding.Empty;
             Label title = new Label();
             title.AutoSize = true;
+            title.MaximumSize = new Size(360, 0);
             title.Font = new Font("Segoe UI Semibold", 11f);
             title.Text = "Which account for " + rpId + "?";
-            title.Margin = new Padding(0, 0, 0, 8);
+            title.Margin = new Padding(0, 0, 0, 12);
             layout.Controls.Add(title);
 
             _list = new ListBox();
-            _list.Width = 320;
+            _list.IntegralHeight = false;
+            _list.HorizontalScrollbar = true;
+            _list.Width = 360;
             _list.Height = 120;
             _list.Items.AddRange(accounts);
             _list.SelectedIndex = 0;
-            _list.Margin = new Padding(0, 0, 0, 16);
+            _list.Margin = Padding.Empty;
             _list.DoubleClick += delegate { _choice = _list.SelectedIndex; Close(); };
             layout.Controls.Add(_list);
 
@@ -163,14 +198,20 @@ namespace PlugPass
             buttons.AutoSize = true;
             buttons.FlowDirection = FlowDirection.RightToLeft;
             buttons.Dock = DockStyle.Fill;
+            buttons.Margin = new Padding(0, 16, 0, 0);
             Button cancel = new Button();
             cancel.Text = "Cancel";
+            cancel.AutoSize = true;
             cancel.MinimumSize = new Size(88, 28);
+            cancel.Margin = new Padding(8, 0, 0, 0);
             cancel.Click += delegate { Close(); };
             Button ok = new Button();
             ok.Text = "Continue";
+            ok.AutoSize = true;
             ok.MinimumSize = new Size(88, 28);
+            ok.Margin = new Padding(8, 0, 0, 0);
             ok.Click += delegate { _choice = _list.SelectedIndex; Close(); };
+            PinForm.SameWidth(ok, cancel);
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(ok);
             layout.Controls.Add(buttons);

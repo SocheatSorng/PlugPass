@@ -65,14 +65,27 @@ namespace PlugPass
                 return null;
             }
 #endif
+            // Prefer a drive whose key this PC knows, so a second (or planted) drive can't take its place.
+            string fallback = null;
             foreach (string root in RemovableRoots())
             {
-                if (KeyFile.Exists(root))
+                KeyFile kf = KeyFile.Open(root);
+                if (kf == null)
                 {
+                    continue;
+                }
+                byte[] secret = PcSecrets.Load(kf.KeyId);
+                if (secret != null)
+                {
+                    Array.Clear(secret, 0, secret.Length);
                     return root;
                 }
+                if (fallback == null)
+                {
+                    fallback = root;
+                }
             }
-            return null;
+            return fallback;
         }
 
         // A drive root given on the command line: the real build accepts only removable drives.

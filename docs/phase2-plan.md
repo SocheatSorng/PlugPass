@@ -66,3 +66,18 @@ Status: draft for the owner's OK, 2026-11-24. Builds on phase 1 (Google accepts 
 
 Manual test at the end: prepare a real USB drive, add it to Google as a passkey, approve it from the
 iPhone, sign in with drive + PIN, and confirm nothing happens with the drive unplugged.
+
+## Security review (2026-11-24): fixed
+
+Lock so only one PlugPass process handles the key file at a time (no lost updates, no shared tries);
+each try counted on the drive before the PIN is checked; a drive claiming its tries are used up is
+"locked" and erases nothing on its word; links on the drive never followed; PBKDF2 iterations capped;
+only the PlugPass extension may start the native host; prefer the drive this PC knows. Tests for each.
+
+## Follow-ups (not blocking)
+
+- Rotate this PC's secret when the PIN changes (old drive copies + old PIN stop working).
+- Recover from a complete `.tmp` key file if the main file is missing (FAT32/exFAT replace isn't atomic).
+- Declare DPI awareness so the windows are sharp at 150%+ display scaling.
+- Clear the master secret from memory after use; show the site name on its own line in the PIN window.
+- Accepted risk: with this PC's Windows account, the PIN can be brute-forced offline. A PIN with letters is the defence.

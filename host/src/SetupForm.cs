@@ -30,23 +30,34 @@ namespace PlugPass
             TableLayoutPanel layout = new TableLayoutPanel();
             layout.AutoSize = true;
             layout.ColumnCount = 2;
+            layout.Dock = DockStyle.Fill;
+            layout.Margin = Padding.Empty;
 
             Label title = NewLabel("Set up a USB drive as your PlugPass key");
             title.Font = new Font("Segoe UI Semibold", 11f);
+            title.Margin = new Padding(0, 0, 0, 16);
             layout.Controls.Add(title);
             layout.SetColumnSpan(title, 2);
 
             layout.Controls.Add(NewLabel("USB drive:"));
             FlowLayoutPanel driveRow = new FlowLayoutPanel();
             driveRow.AutoSize = true;
+            driveRow.WrapContents = false;
             driveRow.Margin = new Padding(0, 0, 0, 8);
+            driveRow.Padding = Padding.Empty;
             _drives = new ComboBox();
             _drives.DropDownStyle = ComboBoxStyle.DropDownList;
             _drives.Width = 220;
+            _drives.Margin = new Padding(0, 0, 8, 0);
+            _drives.Anchor = AnchorStyles.Left;
             _drives.SelectedIndexChanged += delegate { UpdateState(); };
+            _drives.DropDown += delegate { FitDropDown(); };
             Button refresh = new Button();
             refresh.Text = "Refresh";
             refresh.AutoSize = true;
+            refresh.MinimumSize = new Size(88, 0);
+            refresh.Margin = Padding.Empty;
+            refresh.Anchor = AnchorStyles.Left;
             refresh.Click += delegate { LoadDrives(); };
             driveRow.Controls.Add(_drives);
             driveRow.Controls.Add(refresh);
@@ -63,11 +74,13 @@ namespace PlugPass
                 + "PlugPass can't recover a forgotten PIN, and " + KeyFile.MaxWrongPins + " wrong PINs in a row erase the key. "
                 + "Your password always keeps working. The drive works for Google only on this PC.");
             hint.ForeColor = SystemColors.GrayText;
+            hint.Margin = new Padding(0, 4, 0, 0);
             layout.Controls.Add(hint);
             layout.SetColumnSpan(hint, 2);
 
+            // Status line: plain text for information ("plug in a drive"), red only for problems.
             _message = NewLabel("");
-            _message.ForeColor = Color.FromArgb(196, 43, 28);
+            _message.Margin = new Padding(0, 12, 0, 0);
             layout.Controls.Add(_message);
             layout.SetColumnSpan(_message, 2);
 
@@ -75,15 +88,21 @@ namespace PlugPass
             buttons.AutoSize = true;
             buttons.FlowDirection = FlowDirection.RightToLeft;
             buttons.Dock = DockStyle.Fill;
+            buttons.Margin = new Padding(0, 16, 0, 0);
+            buttons.Padding = Padding.Empty;
             Button close = new Button();
             close.Text = "Close";
+            close.AutoSize = true;
             close.MinimumSize = new Size(88, 28);
+            close.Margin = new Padding(8, 0, 0, 0);
             close.Click += delegate { Close(); };
             _create = new Button();
             _create.Text = "Set up drive";
             _create.AutoSize = true;
             _create.MinimumSize = new Size(88, 28);
+            _create.Margin = new Padding(8, 0, 0, 0);
             _create.Click += delegate { CreateKey(); };
+            PinForm.SameWidth(_create, close);
             buttons.Controls.Add(close);
             buttons.Controls.Add(_create);
             layout.Controls.Add(buttons);
@@ -114,19 +133,37 @@ namespace PlugPass
             DriveItem d = _drives.SelectedItem as DriveItem;
             if (d == null)
             {
-                _message.Text = "Plug in a USB flash drive, then click Refresh.";
+                ShowMessage("Plug in a USB flash drive, then click Refresh.", false);
                 _create.Enabled = false;
             }
             else if (KeyFile.Exists(d.Root))
             {
-                _message.Text = "This drive already has a PlugPass key.";
+                ShowMessage("This drive already has a PlugPass key.", false);
                 _create.Enabled = false;
             }
             else
             {
-                _message.Text = "";
+                ShowMessage("", false);
                 _create.Enabled = true;
             }
+        }
+
+        private void ShowMessage(string text, bool isProblem)
+        {
+            _message.Text = text;
+            _message.ForeColor = isProblem ? Color.FromArgb(196, 43, 28) : SystemColors.ControlText;
+        }
+
+        // The box is narrow; let the open list be as wide as the longest drive name.
+        private void FitDropDown()
+        {
+            int width = _drives.Width;
+            foreach (object item in _drives.Items)
+            {
+                width = Math.Max(width, TextRenderer.MeasureText(item.ToString(), _drives.Font).Width
+                    + SystemInformation.VerticalScrollBarWidth);
+            }
+            _drives.DropDownWidth = width;
         }
 
         private void CreateKey()
@@ -143,7 +180,7 @@ namespace PlugPass
             }
             if (problem != null)
             {
-                _message.Text = problem;
+                ShowMessage(problem, true);
                 return;
             }
             try
@@ -157,7 +194,7 @@ namespace PlugPass
                 {
                     throw;
                 }
-                _message.Text = "Couldn't set up the drive: " + ex.Message;
+                ShowMessage("Couldn't set up the drive: " + ex.Message, true);
                 return;
             }
             finally

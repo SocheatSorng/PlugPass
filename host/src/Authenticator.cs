@@ -73,8 +73,17 @@ namespace PlugPass
             {
                 return Error("SecurityError", "Only secure (https) pages can use PlugPass.", false);
             }
-            return type == "create" ? Create(opt, origin, host, prompt, findDrive) : Get(opt, origin, host, prompt, findDrive);
+            using (KeyLock held = KeyLock.Acquire(LockTimeoutMs))
+            {
+                if (held == null)
+                {
+                    return Error("NotAllowedError", "Another PlugPass window is still open.", true);
+                }
+                return type == "create" ? Create(opt, origin, host, prompt, findDrive) : Get(opt, origin, host, prompt, findDrive);
+            }
         }
+
+        private const int LockTimeoutMs = 3 * 60 * 1000;
 
         private static Dictionary<string, object> Create(
             Dictionary<string, object> opt, string origin, string host, IPinPrompt prompt, Func<string> findDrive)
@@ -282,11 +291,13 @@ namespace PlugPass
                 error = Error("NotAllowedError", "The PlugPass key on this drive can't be read.", true);
                 return null;
             }
-            if (PcSecrets.Load(kf.KeyId) == null)
+            byte[] pcSecret = PcSecrets.Load(kf.KeyId);
+            if (pcSecret == null)
             {
                 error = Error("NotAllowedError", "This PlugPass drive was set up on another PC.", true);
                 return null;
             }
+            Array.Clear(pcSecret, 0, pcSecret.Length);
             return kf;
         }
 
@@ -319,6 +330,11 @@ namespace PlugPass
                         prompt.Tell("Too many wrong PINs: the PlugPass key on this drive was erased. "
                             + "Sign in with your password and set up the drive again.");
                         error = Error("NotAllowedError", "The PlugPass key was erased after too many wrong PINs.", true);
+                        return false;
+                    case UnlockResult.Locked:
+                        prompt.Tell("This PlugPass drive is locked after too many wrong PINs. "
+                            + "Sign in with your password and set up the drive again.");
+                        error = Error("NotAllowedError", "This PlugPass drive is locked.", true);
                         return false;
                     case UnlockResult.OtherPc:
                         error = Error("NotAllowedError", "This PlugPass drive was set up on another PC.", true);

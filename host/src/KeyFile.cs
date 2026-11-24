@@ -13,6 +13,7 @@ namespace PlugPass
         Ok,
         WrongPin,
         Wiped,      // too many wrong PINs: the key on this drive was erased
+        Locked,     // the drive says it already used up its tries; nothing is erased on its word
         OtherPc,    // the drive was set up on another PC (or this PC lost its half of the key)
         Damaged,
     }
@@ -56,6 +57,7 @@ namespace PlugPass
         internal const int MinPinLength = 6;
         internal const int MaxPinLength = 64;
         internal const int Iterations = 600000;
+        private const int MaxIterations = 5000000; // a planted file can't make each request take hours
         internal const int KeyIdLength = 16;
         private const int HeaderLength = 64;
         private const int MacLength = 32;
@@ -158,13 +160,14 @@ namespace PlugPass
             try
             {
                 FileInfo fi = new FileInfo(path);
-                if (!fi.Exists || fi.Length > MaxFileBytes || (fi.Attributes & FileAttributes.ReparsePoint) != 0)
+                if (!fi.Exists || fi.Length > MaxFileBytes || IsLink(fi.Attributes) || IsLink(File.GetAttributes(Path.GetDirectoryName(path))))
                 {
                     return null;
                 }
                 byte[] all = File.ReadAllBytes(path);
+                int iterations = all.Length >= HeaderLength ? BitConverter.ToInt32(all, 12) : 0;
                 if (all.Length < HeaderLength + 16 + MacLength || !StartsWithMagic(all) || all[8] != FormatVersion
-                    || BitConverter.ToInt32(all, 12) < Iterations || (all.Length - HeaderLength - MacLength) % 16 != 0)
+                    || iterations < Iterations || iterations > MaxIterations || (all.Length - HeaderLength - MacLength) % 16 != 0)
                 {
                     return null;
                 }
@@ -183,6 +186,8 @@ namespace PlugPass
             }
         }
 
+        // Call while holding KeyLock. The try is counted on the drive BEFORE the PIN is checked, so a
+        // failed write (write-protected or pulled drive) means the PIN is never tested.
         internal UnlockResult Unlock(string pin)
         {
             byte[] pcSecret = PcSecrets.Load(KeyId);
@@ -192,21 +197,23 @@ namespace PlugPass
             }
             if (WrongPins >= MaxWrongPins)
             {
-                Wipe();
-                return UnlockResult.Wiped;
+                // The count isn't covered by the MAC, so a planted drive could claim this: never erase
+                // anything on its word. (A real 8th failure erases below, in the same process.)
+                Array.Clear(pcSecret, 0, pcSecret.Length);
+                return UnlockResult.Locked;
             }
+            _header[WrongPinOffset] = (byte)(WrongPins + 1);
+            WriteFile();
             DeriveKeys(pin ?? "", pcSecret);
             byte[] ct = Slice(_body, 0, _body.Length - MacLength);
             byte[] mac = Slice(_body, _body.Length - MacLength, MacLength);
             if (!Bytes.FixedTimeEquals(mac, ComputeMac(ct)))
             {
-                _header[WrongPinOffset] = (byte)(WrongPins + 1);
                 if (WrongPins >= MaxWrongPins)
                 {
                     Wipe();
                     return UnlockResult.Wiped;
                 }
-                WriteFile();
                 return UnlockResult.WrongPin;
             }
             KeyPayload p = Decrypt(ct);
@@ -215,11 +222,8 @@ namespace PlugPass
                 return UnlockResult.Damaged;
             }
             Payload = p;
-            if (WrongPins != 0)
-            {
-                _header[WrongPinOffset] = 0;
-                WriteFile();
-            }
+            _header[WrongPinOffset] = 0;
+            WriteFile();
             return UnlockResult.Ok;
         }
 
@@ -256,15 +260,24 @@ namespace PlugPass
 
         // Crypto-erase: without this PC's secret the drive file can never be opened again; then the
         // file itself is removed. Only these two exact paths are deleted.
+        // File.Delete removes a link itself, never its target; nothing is written through a path here.
         private void Wipe()
         {
-            PcSecrets.Delete(KeyId);
+            try
+            {
+                PcSecrets.Delete(KeyId);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
             string path = PathFor(_root);
             try
             {
-                if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0)
+                if (File.Exists(path))
                 {
-                    File.WriteAllBytes(path, new byte[new FileInfo(path).Length]);
                     File.Delete(path);
                 }
             }
@@ -361,8 +374,22 @@ namespace PlugPass
         {
             string path = PathFor(_root);
             string temp = path + ".tmp";
+            if (IsLink(File.GetAttributes(Path.GetDirectoryName(path))))
+            {
+                throw new IOException("The PlugPass folder on this drive is a link; refusing to write.");
+            }
+            // A leftover temp file may be a planted link: delete it (that removes the link, not its
+            // target), then create a brand-new file so nothing is ever written through a link.
+            if (Directory.Exists(temp))
+            {
+                Directory.Delete(temp, false); // a junction goes; a real non-empty folder throws: refuse
+            }
+            else if (File.Exists(temp))
+            {
+                File.Delete(temp);
+            }
             byte[] all = Bytes.Concat(_header, _body);
-            using (FileStream fs = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            using (FileStream fs = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
             {
                 fs.Write(all, 0, all.Length);
                 fs.Flush(true);
@@ -443,6 +470,11 @@ namespace PlugPass
             return p;
         }
 
+        private static bool IsLink(FileAttributes a)
+        {
+            return (a & FileAttributes.ReparsePoint) != 0;
+        }
+
         private static bool StartsWithMagic(byte[] all)
         {
             for (int i = 0; i < Magic.Length; i++)
@@ -477,6 +509,46 @@ namespace PlugPass
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool MoveFileEx(string existing, string replacement, int flags);
+    }
+
+    // One PlugPass process at a time works with key files: each browser request starts its own
+    // process, and without this two of them could overwrite each other's changes or both spend the
+    // same wrong-PIN try. Hold it from reading the key file until the last write.
+    internal sealed class KeyLock : IDisposable
+    {
+        private readonly System.Threading.Mutex _mutex;
+
+        private KeyLock(System.Threading.Mutex mutex)
+        {
+            _mutex = mutex;
+        }
+
+        // Null if another PlugPass window is still open after the timeout.
+        internal static KeyLock Acquire(int timeoutMs)
+        {
+            System.Threading.Mutex m = new System.Threading.Mutex(false, @"Local\PlugPass-keyfile");
+            bool owned;
+            try
+            {
+                owned = m.WaitOne(timeoutMs);
+            }
+            catch (System.Threading.AbandonedMutexException)
+            {
+                owned = true; // the previous holder exited without releasing: we own it now
+            }
+            if (!owned)
+            {
+                m.Dispose();
+                return null;
+            }
+            return new KeyLock(m);
+        }
+
+        public void Dispose()
+        {
+            _mutex.ReleaseMutex();
+            _mutex.Dispose();
+        }
     }
 
     // This PC's half of each drive key: <DataDir>\keys\<key ID>.pcsecret, DPAPI (current user).
