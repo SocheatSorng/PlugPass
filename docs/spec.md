@@ -43,6 +43,12 @@ security-key protocol. So the extension stands in:
 real WebAuthn stack, or may want hardware attestation. Phase 1 proves the round trip on webauthn.io,
 then on a Google account, before anything else is built.
 
+**Result (2026-11-24, Brave):** webauthn.io register + sign-in work. Google accepted a PlugPass key with
+`none` attestation ("New security key added to your account"). Path: Security > Passkeys and security
+keys > Create a passkey > (on a PC without Windows Hello Google shows "can't be created on this device")
+> **Use another device**: that request is a plain security key (not discoverable, no PIN required),
+which phase 1 serves. Google sign-in with it: pending.
+
 ### 2. Windows: sign-in tile (credential provider)
 
 - Enrolment (in the helper app, after a Windows password check): asks for the Windows password once,
