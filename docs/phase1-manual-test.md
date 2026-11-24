@@ -16,7 +16,7 @@ click **Sign in / Add** in a PlugPass window. Phase 2 moves the key to the drive
 
 ## 2. Load the extension
 
-1. Open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**.
+1. Open `chrome://extensions` (or `edge://extensions`, `brave://extensions`), turn on **Developer mode**.
 2. **Load unpacked** and choose `bin\extension`.
 3. The ID must be `amppkfbnjicgeeakigkmafdllhknaigl`.
 

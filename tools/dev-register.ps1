@@ -1,4 +1,4 @@
-# DEVELOPMENT ONLY (phase 1): tells Chrome and Edge where the PlugPass helper app is, for the current
+# DEVELOPMENT ONLY (phase 1): tells Chrome, Edge and Brave where the PlugPass helper app is, for the current
 # Windows user only (HKCU). Changes your registry: run it only when you mean to test in your browser.
 #   .\tools\dev-register.ps1              register bin\PlugPass.exe (the real build, with the consent window)
 #   .\tools\dev-register.ps1 -Unregister  remove the registration again
@@ -10,7 +10,8 @@ $hostName = 'com.plugpass.host'
 $extensionId = 'amppkfbnjicgeeakigkmafdllhknaigl'   # fixed by "key" in extension\manifest.json
 $keys = @(
     "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$hostName",
-    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$hostName"
+    "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$hostName",
+    "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\$hostName"
 )
 $manifestPath = Join-Path $root "bin\$hostName.json"
 
@@ -38,4 +39,4 @@ foreach ($k in $keys) {
     Write-Host "Registered $k"
 }
 Write-Host "Helper app: $exe"
-Write-Host "Now load $(Join-Path $root 'bin\extension') in chrome://extensions or edge://extensions (Load unpacked)."
+Write-Host "Now load $(Join-Path $root 'bin\extension') in chrome://, edge:// or brave://extensions (Load unpacked)."
