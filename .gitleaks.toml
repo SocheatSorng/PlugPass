@@ -1,0 +1,15 @@
+# gitleaks configuration: all default rules, plus one narrow exception.
+
+[extend]
+useDefault = true
+
+# extension/manifest.json "key" is the extension's PUBLIC key (RSA SubjectPublicKeyInfo). Chrome uses it
+# to give the extension a fixed ID, which the native messaging host's allowed_origins depends on. It is
+# public by design; the private half was never kept. Only this exact value, only in that file, is
+# allowed: any other value there, or this value anywhere else, is still reported.
+[[allowlists]]
+description = "Chrome extension public key in the manifest"
+condition = "AND"
+paths = ['''^extension/manifest\.json$''']
+regexTarget = "secret"
+regexes = ['''^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnsYrns56mfhrqzVOuHtRXJyzBg9CDNui3OfbS/Ju9rgta18ZCcacNyz8NtZj38REjg3TkLMJsC8m1Pd0b7ytVIWQWKFSAORFGoI9fPSxyAxTS7fjU5b6v/D\+z9cs2GzYqEk0sNC6/so0VfnU8C0nNr/s1ZKclxDALDQlBg75HWdR2rzAkiN\+dnIqVf38vtkH4UqwmxdTbFMjZDx26QAUgHDILh8PVWXBiyp8WSUi6\+Smp5MqaxtwxuehGkbOW3hH/74w69WFU2phwaZlU0hh\+7r1PF0c1g7qNWsorjBiU7UNkvsvng9JPs0KlQlMfay3L1h3SesJ0BjUHh11oPZf\+QIDAQAB$''']
