@@ -12,12 +12,12 @@ if (-not (Test-Path $csc)) { throw "C# compiler not found at $csc" }
 
 $sources = Get-ChildItem (Join-Path $root 'host\src') -Filter *.cs | ForEach-Object { $_.FullName }
 $refs = '/r:System.dll', '/r:System.Core.dll', '/r:System.Security.dll',
-        '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll'
+        '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', '/r:System.Web.Extensions.dll'
 
 foreach ($variant in @(@{ Dir = 'bin'; Define = $null }, @{ Dir = 'bin\test'; Define = '/define:TESTHOOKS' })) {
     $out = Join-Path $root $variant.Dir
     New-Item -ItemType Directory -Force $out | Out-Null
-    $cscArgs = @('/nologo', '/target:exe', '/optimize+', '/platform:anycpu', "/out:$out\PlugPass.exe") + $refs
+    $cscArgs = @('/nologo', '/target:winexe', '/optimize+', '/platform:anycpu', "/out:$out\PlugPass.exe") + $refs
     if ($variant.Define) { $cscArgs += $variant.Define }
     & $csc @cscArgs $sources
     if ($LASTEXITCODE -ne 0) { throw "Build failed ($($variant.Dir))." }

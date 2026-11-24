@@ -21,6 +21,12 @@ export default [
       sourceType: "module",
       globals: { ...globals.node },
     },
+    // Tests use only fixed repo paths and their own data; these two rules would only add noise there.
+    // They stay on for the extension.
+    rules: {
+      "security/detect-non-literal-fs-filename": "off",
+      "security/detect-object-injection": "off",
+    },
   },
   {
     rules: {

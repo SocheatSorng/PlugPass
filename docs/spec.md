@@ -61,8 +61,10 @@ then on a Google account, before anything else is built.
 ## Phases
 
 0. **Foundation** (done): repo, lint, tests, pre-commit, CI, security workflows, agent, CLAUDE.md.
-1. **Spike: does Google accept it?** Minimal extension + helper with an in-memory test key. Register and
-   sign in on webauthn.io, then on Google (owner's choice of account). Stop and report if Google refuses.
+1. **Spike: does Google accept it?** Extension + helper with a temporary master secret in
+   `%LOCALAPPDATA%\PlugPass\spike-master.bin` (DPAPI, no drive, no PIN; `host/src/SpikeMaster.cs`) and a
+   consent window instead of the PIN. Register and sign in on webauthn.io, then on Google (owner's
+   choice of account). Stop and report if Google refuses. Steps: `docs/phase1-manual-test.md`.
 2. **Drive key + PIN:** key file format, PIN box, wrong-PIN counter, drive detection; full tests with a
    folder standing in for the drive (`--key-dir`, test build only).
 3. **Google, finished:** setup window (prepare drive, set PIN), native host registration in HKCU,

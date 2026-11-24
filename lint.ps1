@@ -10,9 +10,9 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $sources = Get-ChildItem (Join-Path $root 'host\src') -Filter *.cs | ForEach-Object { $_.FullName }
 foreach ($define in @($null, '/define:TESTHOOKS')) {
     $out = Join-Path ([IO.Path]::GetTempPath()) ('pp-lint-' + [Guid]::NewGuid().ToString('N') + '.exe')
-    $cscArgs = @('/nologo', '/target:exe', '/warn:4', '/warnaserror+', "/out:$out",
+    $cscArgs = @('/nologo', '/target:winexe', '/warn:4', '/warnaserror+', "/out:$out",
         '/r:System.dll', '/r:System.Core.dll', '/r:System.Security.dll',
-        '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll')
+        '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll', '/r:System.Web.Extensions.dll')
     if ($define) { $cscArgs += $define }
     & $csc @cscArgs $sources
     if ($LASTEXITCODE -ne 0) { Write-Host "lint: C# warnings/errors found $define" -ForegroundColor Red; $problems++ }
