@@ -34,8 +34,9 @@ nothing. Then open PlugPass → **Windows sign-in...** → **Turn off for all dr
 
 ## 3. Last resort: system restore
 
-**Troubleshoot → Advanced options → System Restore**, and pick the restore point named
-`Before PlugPass Windows sign-in` (made before the first time the tile was turned on).
+**Troubleshoot → Advanced options → System Restore**, and pick a restore point from before Windows
+sign-in was turned on (Windows names automatic ones "Scheduled Checkpoint"). It may also undo other
+programs installed after it.
 
 ## What PlugPass changed (for reference)
 

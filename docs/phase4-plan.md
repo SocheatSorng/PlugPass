@@ -48,3 +48,10 @@ signs in the local account with no typing; no drive, the password works as alway
 2. **Also unlock the lock screen** (Win+L) with the drive? Recommended: yes.
 3. **Safety net before the first real registration:** restore point + recovery recipe (recommended),
    optionally also a second administrator account as a backup way in.
+
+## Result (2026-11-24)
+
+Security review findings fixed (see commit "Fix security review findings for Windows sign-in"). Real
+test by the owner on their PC with a FAT32 USB drive, safety net = a Windows restore point from
+before the tile was turned on: sign-in and Win+L unlock with the drive work without typing; without
+the drive the normal password screen appears; plugging the drive in at the lock screen unlocks.
